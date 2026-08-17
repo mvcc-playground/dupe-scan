@@ -1,4 +1,4 @@
-const domain = @import("domain.zig");
+const domain = @import("domain");
 
 pub const FileVisitor = struct {
     context: *anyopaque,
@@ -13,8 +13,8 @@ pub const DirectoryWalker = struct {
 
 pub const FileReader = struct {
     context: *anyopaque,
-    read_at_most: *const fn (context: *anyopaque, path: []const u8, offset: u64, buffer: []u8) anyerror!usize,
-    read_all: *const fn (context: *anyopaque, path: []const u8, buffer: []u8) anyerror!u64,
+    fingerprint: *const fn (context: *anyopaque, path: []const u8, size: u64, buffer: []u8) anyerror!domain.Fingerprint,
+    full_hash: *const fn (context: *anyopaque, path: []const u8, expected_size: u64, buffer: []u8) anyerror!domain.ContentHash,
 };
 
 pub const VolumeClassifier = struct {

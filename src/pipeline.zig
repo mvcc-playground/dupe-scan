@@ -1,5 +1,9 @@
 const std = @import("std");
 const domain = @import("domain");
+const ports = @import("ports");
+
+const sample_size: u64 = 64 * 1024;
+const worker_buffer_size = 256 * 1024;
 
 pub const SizeBucket = struct {
     size: u64,
@@ -57,6 +61,93 @@ pub const Grouping = struct {
         self.name_collisions = &.{};
     }
 };
+
+pub const ScanResult = struct {
+    allocator: std.mem.Allocator,
+    records: []domain.FileRecord,
+    errors: []domain.ScanError,
+    grouping: Grouping,
+    metrics: domain.Metrics,
+
+    pub fn deinit(self: *ScanResult) void {
+        self.grouping.deinit();
+        for (self.records) |record| self.allocator.free(record.absolute_path);
+        for (self.errors) |scan_error| self.allocator.free(scan_error.path);
+        if (self.records.len != 0) self.allocator.free(self.records);
+        if (self.errors.len != 0) self.allocator.free(self.errors);
+        self.records = &.{};
+        self.errors = &.{};
+    }
+};
+
+pub fn scan(
+    allocator: std.mem.Allocator,
+    request: domain.ScanRequest,
+    walker: ports.DirectoryWalker,
+    reader: ports.FileReader,
+) !ScanResult {
+    var collector = RecordCollector.init(allocator);
+    errdefer collector.deinit();
+
+    const visitor = ports.FileVisitor{
+        .context = @ptrCast(&collector),
+        .on_file = RecordCollector.onFile,
+        .on_error = RecordCollector.onError,
+    };
+    for (request.roots) |root| try walker.walk(walker.context, root, visitor);
+
+    var buckets = try bucketBySize(allocator, collector.records.items);
+    defer buckets.deinit();
+    collector.metrics.size_candidates = @intCast(buckets.candidateFileCount());
+
+    const buffer = try allocator.alloc(u8, worker_buffer_size);
+    defer allocator.free(buffer);
+
+    var sampled: std.ArrayListUnmanaged(SampledRecord) = .empty;
+    defer sampled.deinit(allocator);
+    for (buckets.buckets) |bucket| {
+        for (bucket.indexes) |record_index| {
+            const record = collector.records.items[record_index];
+            const fingerprint = reader.fingerprint(reader.context, record.absolute_path, record.size, buffer) catch |err| {
+                try collector.appendReadError(record.absolute_path, err);
+                continue;
+            };
+            try sampled.append(allocator, .{ .record_index = record_index, .fingerprint = fingerprint });
+        }
+    }
+
+    const full_candidates = try fullHashCandidateIndexes(allocator, collector.records.items, sampled.items);
+    defer allocator.free(full_candidates);
+    collector.metrics.sample_candidates = @intCast(full_candidates.len);
+
+    var hashed: std.ArrayListUnmanaged(HashedRecord) = .empty;
+    defer hashed.deinit(allocator);
+    for (full_candidates) |record_index| {
+        const record = collector.records.items[record_index];
+        collector.metrics.full_hashes += 1;
+        const digest = reader.full_hash(reader.context, record.absolute_path, record.size, buffer) catch |err| {
+            try collector.appendReadError(record.absolute_path, err);
+            continue;
+        };
+        collector.metrics.bytes_read += record.size;
+        try hashed.append(allocator, .{ .record = record, .digest = digest });
+    }
+
+    var grouping = try buildGroups(allocator, hashed.items);
+    errdefer grouping.deinit();
+    const records = try collector.records.toOwnedSlice(allocator);
+    errdefer freeRecords(allocator, records);
+    const errors = try collector.errors.toOwnedSlice(allocator);
+    errdefer freeErrors(allocator, errors);
+
+    return .{
+        .allocator = allocator,
+        .records = records,
+        .errors = errors,
+        .grouping = grouping,
+        .metrics = collector.metrics,
+    };
+}
 
 pub fn bucketBySize(allocator: std.mem.Allocator, records: []const domain.FileRecord) !SizeBuckets {
     if (records.len < 2) return .{ .allocator = allocator };
@@ -271,4 +362,139 @@ fn hasDifferentDigest(hashed: []const HashedRecord, indexes: []const usize) bool
         if (!first.eql(hashed[index].digest)) return true;
     }
     return false;
+}
+
+const SampledRecord = struct {
+    record_index: usize,
+    fingerprint: domain.Fingerprint,
+};
+
+const RecordCollector = struct {
+    allocator: std.mem.Allocator,
+    records: std.ArrayListUnmanaged(domain.FileRecord) = .empty,
+    errors: std.ArrayListUnmanaged(domain.ScanError) = .empty,
+    metrics: domain.Metrics = .{},
+
+    fn init(allocator: std.mem.Allocator) RecordCollector {
+        return .{ .allocator = allocator };
+    }
+
+    fn deinit(self: *RecordCollector) void {
+        freeRecords(self.allocator, self.records.items);
+        freeErrors(self.allocator, self.errors.items);
+        self.records.deinit(self.allocator);
+        self.errors.deinit(self.allocator);
+    }
+
+    fn onFile(context: *anyopaque, record: domain.FileRecord) anyerror!void {
+        const self: *RecordCollector = @ptrCast(@alignCast(context));
+        try self.records.append(self.allocator, record);
+        self.metrics.files_enumerated += 1;
+        self.metrics.bytes_enumerated += record.size;
+    }
+
+    fn onError(context: *anyopaque, scan_error: domain.ScanError) anyerror!void {
+        const self: *RecordCollector = @ptrCast(@alignCast(context));
+        try self.errors.append(self.allocator, scan_error);
+        self.metrics.recoverable_errors += 1;
+        if (scan_error.kind == .skipped_reparse_point) self.metrics.skipped_entries += 1;
+    }
+
+    fn appendReadError(self: *RecordCollector, path: []const u8, source: anyerror) !void {
+        const owned_path = try self.allocator.dupe(u8, path);
+        errdefer self.allocator.free(owned_path);
+        const kind: domain.ScanErrorKind = if (source == error.FileChanged) .file_changed else .read_failed;
+        try RecordCollector.onError(@ptrCast(self), .{ .kind = kind, .path = owned_path });
+    }
+};
+
+fn fullHashCandidateIndexes(
+    allocator: std.mem.Allocator,
+    records: []const domain.FileRecord,
+    sampled: []const SampledRecord,
+) ![]usize {
+    if (sampled.len < 2) return allocator.alloc(usize, 0);
+
+    const selected = try allocator.alloc(bool, records.len);
+    defer allocator.free(selected);
+    @memset(selected, false);
+
+    const ordered = try allocator.alloc(usize, sampled.len);
+    defer allocator.free(ordered);
+    for (ordered, 0..) |*slot, index| slot.* = index;
+    std.mem.sortUnstable(usize, ordered, SampleSortContext{ .records = records, .sampled = sampled }, SampleSortContext.lessThan);
+
+    var start: usize = 0;
+    while (start < ordered.len) {
+        var end = start + 1;
+        while (end < ordered.len and sampleMatches(sampled[ordered[start]].fingerprint, sampled[ordered[end]].fingerprint)) : (end += 1) {}
+        if (end - start >= 2) {
+            for (ordered[start..end]) |sample_index| selected[sampled[sample_index].record_index] = true;
+        }
+        start = end;
+    }
+
+    std.mem.sortUnstable(usize, ordered, SampleNameSortContext{ .records = records, .sampled = sampled }, SampleNameSortContext.lessThan);
+    start = 0;
+    while (start < ordered.len) {
+        var end = start + 1;
+        while (end < ordered.len and sameNameAndSize(
+            .{ .record = records[sampled[ordered[start]].record_index], .digest = undefined },
+            .{ .record = records[sampled[ordered[end]].record_index], .digest = undefined },
+        )) : (end += 1) {}
+        if (end - start >= 2) {
+            for (ordered[start..end]) |sample_index| selected[sampled[sample_index].record_index] = true;
+        }
+        start = end;
+    }
+
+    var count: usize = 0;
+    for (selected) |is_selected| {
+        if (is_selected) count += 1;
+    }
+    const indexes = try allocator.alloc(usize, count);
+    var written: usize = 0;
+    for (selected, 0..) |is_selected, record_index| {
+        if (!is_selected) continue;
+        indexes[written] = record_index;
+        written += 1;
+    }
+    return indexes;
+}
+
+const SampleSortContext = struct {
+    records: []const domain.FileRecord,
+    sampled: []const SampledRecord,
+
+    fn lessThan(self: SampleSortContext, left_index: usize, right_index: usize) bool {
+        const left = self.sampled[left_index];
+        const right = self.sampled[right_index];
+        const first_order = std.mem.order(u8, &left.fingerprint.first.bytes, &right.fingerprint.first.bytes);
+        if (first_order != .eq) return first_order == .lt;
+        const last_order = std.mem.order(u8, &left.fingerprint.last.bytes, &right.fingerprint.last.bytes);
+        if (last_order != .eq) return last_order == .lt;
+        return std.mem.order(u8, self.records[left.record_index].absolute_path, self.records[right.record_index].absolute_path) == .lt;
+    }
+};
+
+const SampleNameSortContext = struct {
+    records: []const domain.FileRecord,
+    sampled: []const SampledRecord,
+
+    fn lessThan(self: SampleNameSortContext, left_index: usize, right_index: usize) bool {
+        const left = self.records[self.sampled[left_index].record_index];
+        const right = self.records[self.sampled[right_index].record_index];
+        const name_order = std.mem.order(u8, left.comparison_name, right.comparison_name);
+        if (name_order != .eq) return name_order == .lt;
+        if (left.size != right.size) return left.size < right.size;
+        return std.mem.order(u8, left.absolute_path, right.absolute_path) == .lt;
+    }
+};
+
+fn freeRecords(allocator: std.mem.Allocator, records: []const domain.FileRecord) void {
+    for (records) |record| allocator.free(record.absolute_path);
+}
+
+fn freeErrors(allocator: std.mem.Allocator, errors: []const domain.ScanError) void {
+    for (errors) |scan_error| allocator.free(scan_error.path);
 }
