@@ -10,11 +10,21 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const pipeline_module = b.createModule(.{
+        .root_source_file = b.path("src/pipeline.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "domain", .module = domain_module }},
+    });
+
     const test_module = b.createModule(.{
         .root_source_file = b.path("tests/test_root.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "domain", .module = domain_module }},
+        .imports = &.{
+            .{ .name = "domain", .module = domain_module },
+            .{ .name = "pipeline", .module = pipeline_module },
+        },
     });
     const tests = b.addTest(.{ .root_module = test_module });
     const run_tests = b.addRunArtifact(tests);
