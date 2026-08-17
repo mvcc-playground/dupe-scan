@@ -24,10 +24,11 @@ test "CLI execution writes duplicate JSONL to its supplied writer" {
     try main.runWithWriter(
         std.testing.allocator,
         std.testing.io,
-        &.{ root, "--backend", "portable" },
+        &.{ root, "--backend", "auto" },
         &output.writer,
     );
 
     const text = output.writer.buffer[0..output.writer.end];
     try std.testing.expect(std.mem.indexOf(u8, text, "\"event\":\"duplicate_group\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\"backend\":\"win32\"") != null);
 }

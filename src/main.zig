@@ -1,8 +1,10 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const domain = @import("domain");
 const pipeline = @import("pipeline");
 const portable = @import("portable");
 const report_jsonl = @import("report_jsonl");
+const windows = @import("windows");
 
 pub const ParsedArgs = struct {
     allocator: std.mem.Allocator,
@@ -66,22 +68,58 @@ pub fn runWithWriter(
     defer parsed.deinit();
     if (parsed.request.output_path != null) return error.OutputPathRequiresFileExecution;
 
-    switch (parsed.request.backend) {
-        .win32 => return error.UnsupportedBackend,
-        .auto, .portable => {
-            var adapter = portable.Adapter.init(allocator, io);
-            var result = try pipeline.scan(
-                allocator,
-                parsed.request,
-                adapter.directoryWalker(),
-                adapter.fileReader(),
-            );
-            defer result.deinit();
+    const jsonl = try renderRequest(allocator, io, parsed.request);
+    defer allocator.free(jsonl);
+    try writer.writeAll(jsonl);
+}
 
-            var reporter = report_jsonl.JsonlReporter.init(writer);
-            try reporter.writeResult(.portable, &result);
-        },
+pub fn main(init: std.process.Init) !void {
+    var iterator = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
+    defer iterator.deinit();
+    _ = iterator.next();
+
+    var args: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (args.items) |argument| init.gpa.free(argument);
+        args.deinit(init.gpa);
     }
+    while (iterator.next()) |argument| {
+        const owned = try init.gpa.dupe(u8, argument);
+        errdefer init.gpa.free(owned);
+        try args.append(init.gpa, owned);
+    }
+
+    var parsed = try parseArgs(init.gpa, args.items);
+    defer parsed.deinit();
+    const jsonl = try renderRequest(init.gpa, init.io, parsed.request);
+    defer init.gpa.free(jsonl);
+    if (parsed.request.output_path) |output_path| {
+        var report_file = try std.Io.Dir.cwd().createFile(init.io, output_path, .{});
+        defer report_file.close(init.io);
+        try report_file.writeStreamingAll(init.io, jsonl);
+    } else {
+        try std.Io.File.stdout().writeStreamingAll(init.io, jsonl);
+    }
+}
+
+fn renderRequest(allocator: std.mem.Allocator, io: std.Io, request: domain.ScanRequest) ![]u8 {
+    if (request.backend == .win32 and builtin.os.tag != .windows) return error.UnsupportedBackend;
+    const use_windows = request.backend == .win32 or
+        (request.backend == .auto and builtin.os.tag == .windows);
+    var result = if (use_windows) blk: {
+        var adapter = windows.Adapter.init(allocator, io);
+        break :blk try pipeline.scan(allocator, request, adapter.directoryWalker(), adapter.fileReader());
+    } else blk: {
+        var adapter = portable.Adapter.init(allocator, io);
+        break :blk try pipeline.scan(allocator, request, adapter.directoryWalker(), adapter.fileReader());
+    };
+    defer result.deinit();
+
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
+    var reporter = report_jsonl.JsonlReporter.init(&output.writer);
+    try reporter.writeResult(if (use_windows) .win32 else .portable, &result);
+    return output.toOwnedSlice();
 }
 
 fn parseWorkers(value: []const u8) !domain.WorkerLimit {

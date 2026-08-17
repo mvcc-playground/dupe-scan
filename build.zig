@@ -37,6 +37,17 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const windows_module = b.createModule(.{
+        .root_source_file = b.path("src/platform/windows.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "domain", .module = domain_module },
+            .{ .name = "ports", .module = ports_module },
+            .{ .name = "portable", .module = portable_module },
+        },
+    });
+
     const report_module = b.createModule(.{
         .root_source_file = b.path("src/report_jsonl.zig"),
         .target = target,
@@ -56,8 +67,15 @@ pub fn build(b: *std.Build) void {
             .{ .name = "pipeline", .module = pipeline_module },
             .{ .name = "portable", .module = portable_module },
             .{ .name = "report_jsonl", .module = report_module },
+            .{ .name = "windows", .module = windows_module },
         },
     });
+
+    const executable = b.addExecutable(.{
+        .name = "dupe-scan",
+        .root_module = main_module,
+    });
+    b.installArtifact(executable);
 
     const test_module = b.createModule(.{
         .root_source_file = b.path("tests/test_root.zig"),
@@ -69,6 +87,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "portable", .module = portable_module },
             .{ .name = "report_jsonl", .module = report_module },
             .{ .name = "main", .module = main_module },
+            .{ .name = "windows", .module = windows_module },
         },
     });
     const tests = b.addTest(.{ .root_module = test_module });
