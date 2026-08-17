@@ -7,11 +7,12 @@ Build a Windows-first, cross-platform CLI that finds byte-identical files even w
 ## User-facing contract
 
 ```text
-dupe-scan <root>... [--output <path>] [--workers auto|N]
+dupe-scan <root>... [--output <path>] [--workers auto|N] [--backend auto|portable|win32]
 ```
 
 - Roots are scanned recursively.
 - JSON Lines is emitted to stdout by default. `--output` writes the same report to a user-provided new or existing report path.
+- `--backend auto` selects the Windows native adapter on Windows and the portable adapter elsewhere. `portable` is useful for comparison and diagnostics; `win32` fails clearly on non-Windows platforms.
 - The report contains duplicate groups, same-name-and-size files whose full hashes differ, recoverable errors, timing metrics, and scan configuration.
 - No action command exists in this release.
 
@@ -49,11 +50,58 @@ CLI
 
 ### Adapters
 
-- Windows walker: `FindFirstFileExW` / `FindNextFileW` with UTF-16 paths and `FIND_FIRST_EX_LARGE_FETCH`; it uses returned metadata rather than opening every file merely to learn its size.
+- Windows walker: `FindFirstFileExW` / `FindNextFileW` with UTF-16 paths, extended-path support, and `FIND_FIRST_EX_LARGE_FETCH`; it uses returned metadata rather than opening every file merely to learn its size. Entries marked `FILE_ATTRIBUTE_REPARSE_POINT` are skipped before recursion.
+- Windows reader: `CreateFileW` opens only regular candidate files with shared read/write/delete access and `FILE_FLAG_SEQUENTIAL_SCAN`, then streams fixed-size buffers through Zig BLAKE3. It never opens a file for writing and never requests a lock.
 - Windows volume adapter: classifies root drives with Win32 volume APIs, allowing conservative defaults for removable and network media.
 - Portable walker: standard Zig filesystem traversal for non-Windows systems.
 - Hash adapter: Zig BLAKE3 in the initial release. It stays behind the `Hasher` port so an FFI implementation can be benchmarked and substituted later without touching orchestration.
 - JSONL adapter: buffered stdout or an explicitly requested report file.
+
+## Native execution policy
+
+The scanner has a portable orchestration core and a Windows fast path. The
+fast path is selected automatically only when all requested roots can use it;
+otherwise each root is routed to the portable walker while preserving the same
+report schema.
+
+- Directory enumeration uses Win32 metadata in one pass; no per-entry `stat`
+  calls are added in the Windows adapter.
+- Candidate reads use a fixed buffer per worker and sequential handles. Buffer
+  ownership stays with one worker for its entire job, avoiding allocation and
+  lock contention in the hot path.
+- The scheduler creates a queue per `VolumeKey` and limits heavy readers per
+  queue. This stops a fast SSD and a slow USB drive from competing in the same
+  global queue.
+- `GetDriveTypeW` classifies a root as fixed, removable, remote, or unknown.
+  Auto mode assigns two simultaneous full-file readers to a fixed volume and
+  one to removable, remote, and unknown volumes. `--workers N` is a global
+  ceiling distributed fairly across nonempty volume queues.
+- Standard Zig BLAKE3 is the baseline implementation. Any FFI or IOCP reader
+  must remain optional and may become the default only after reproducible
+  benchmark evidence shows a gain on the same dataset without increasing error
+  rate or memory beyond the documented budget.
+- The initial version performs a fresh scan every run. It writes no persistent
+  index and does not use the NTFS USN Journal. An incremental index is a future
+  adapter because it requires invalidation, database, and non-NTFS fallbacks.
+
+## Agent operating policy
+
+The program's behavior is deliberately conservative, including when it runs
+against removable media and backups:
+
+- It has no mutation APIs in its domain interfaces. The only allowed write is
+  a requested JSONL report path; all scanner inputs are read-only.
+- It never trusts names, timestamps, samples, or cached metadata as proof of
+  equality. A duplicate report requires matching full BLAKE3 digests after a
+  successful complete read of each file.
+- It treats changed, locked, inaccessible, malformed, or disappearing files
+  as recoverable observations. It records a structured error and continues
+  with independent work.
+- It does not traverse reparse points, symlinks, or junctions, so recursive
+  scans cannot escape a chosen root or loop through aliases.
+- It records backend selection, drive class, allocated worker limits, elapsed
+  time, files and bytes processed, and reductions at every candidate stage.
+  This data is the only basis for future performance changes.
 
 ## Pipeline and performance policy
 
