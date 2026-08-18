@@ -40,6 +40,7 @@ pub const FileRecord = struct {
     size: u64,
     modified_ns: i128,
     volume_key: VolumeKey,
+    drive_class: DriveClass = .unknown,
 };
 
 pub const ScanErrorKind = enum {
@@ -74,6 +75,13 @@ pub const Metrics = struct {
 pub const WorkerLimit = union(enum) {
     auto,
     explicit: u16,
+};
+
+pub const VolumeReaderPlan = struct {
+    key: VolumeKey,
+    drive_class: DriveClass,
+    pending_jobs: u64,
+    readers: u8,
 };
 
 pub const ScanRequest = struct {

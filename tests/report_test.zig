@@ -41,4 +41,5 @@ test "JSONL reporter emits duplicate collision and summary events" {
     try std.testing.expect(std.mem.indexOf(u8, text, "\"event\":\"duplicate_group\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "\"event\":\"name_collision_group\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "\"event\":\"scan_summary\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\"worker_plan\"") != null);
 }

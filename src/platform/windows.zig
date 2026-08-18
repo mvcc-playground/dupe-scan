@@ -20,6 +20,10 @@ const find_ex_search_name_match: u32 = 0;
 const find_first_ex_large_fetch: u32 = 0x00000002;
 const error_no_more_files: u32 = 18;
 
+pub const drive_type_removable: u32 = 2;
+pub const drive_type_fixed: u32 = 3;
+pub const drive_type_remote: u32 = 4;
+
 pub const file_attribute_directory: u32 = 0x00000010;
 pub const file_attribute_reparse_point: u32 = 0x00000400;
 
@@ -33,6 +37,15 @@ pub fn mapAttributes(attributes: u32) EntryKind {
     if ((attributes & file_attribute_reparse_point) != 0) return .skip_reparse_point;
     if ((attributes & file_attribute_directory) != 0) return .directory;
     return .file;
+}
+
+pub fn mapDriveType(value: u32) domain.DriveClass {
+    return switch (value) {
+        drive_type_removable => .removable,
+        drive_type_fixed => .fixed,
+        drive_type_remote => .remote,
+        else => .unknown,
+    };
 }
 
 const FileTime = extern struct {
@@ -64,6 +77,7 @@ extern "kernel32" fn FindFirstFileExW(
 extern "kernel32" fn FindNextFileW(handle: Handle, find_data: *Win32FindDataW) callconv(.winapi) i32;
 extern "kernel32" fn FindClose(handle: Handle) callconv(.winapi) i32;
 extern "kernel32" fn GetLastError() callconv(.winapi) u32;
+extern "kernel32" fn GetDriveTypeW(root_path_name: [*:0]const u16) callconv(.winapi) u32;
 
 extern "kernel32" fn CreateFileW(
     file_name: [*:0]const u16,
@@ -118,30 +132,39 @@ pub const Adapter = struct {
         };
         defer self.allocator.free(absolute_root);
 
-        var pending_directories: std.ArrayListUnmanaged([]u8) = .empty;
+        var pending_directories: std.ArrayListUnmanaged(PendingDirectory) = .empty;
         const root_directory = try self.allocator.dupe(u8, absolute_root);
-        pending_directories.append(self.allocator, root_directory) catch |err| {
+        const drive_class = self.classifyPath(absolute_root) catch |err| {
+            self.allocator.free(root_directory);
+            return err;
+        };
+        const root_work = PendingDirectory{
+            .path = root_directory,
+            .volume_key = volumeKeyForPath(absolute_root),
+            .drive_class = drive_class,
+        };
+        pending_directories.append(self.allocator, root_work) catch |err| {
             self.allocator.free(root_directory);
             return err;
         };
         defer {
-            for (pending_directories.items) |directory| self.allocator.free(directory);
+            for (pending_directories.items) |directory| self.allocator.free(directory.path);
             pending_directories.deinit(self.allocator);
         }
 
         while (pending_directories.pop()) |directory| {
-            defer self.allocator.free(directory);
+            defer self.allocator.free(directory.path);
             try self.walkDirectory(directory, visitor, &pending_directories);
         }
     }
 
     fn walkDirectory(
         self: *Adapter,
-        directory: []const u8,
+        directory: PendingDirectory,
         visitor: ports.FileVisitor,
-        pending_directories: *std.ArrayListUnmanaged([]u8),
+        pending_directories: *std.ArrayListUnmanaged(PendingDirectory),
     ) !void {
-        const search_path = try self.searchPath(directory);
+        const search_path = try self.searchPath(directory.path);
         defer self.allocator.free(search_path);
         const wide_search_path = try extendedWidePath(self.allocator, search_path);
         defer self.allocator.free(wide_search_path);
@@ -157,7 +180,7 @@ pub const Adapter = struct {
         );
         if (find_handle == invalid_handle) {
             const code = GetLastError();
-            try self.emitError(visitor, mapWin32Error(code), directory, code);
+            try self.emitError(visitor, mapWin32Error(code), directory.path, code);
             return;
         }
         defer _ = FindClose(find_handle);
@@ -168,31 +191,35 @@ pub const Adapter = struct {
 
             const code = GetLastError();
             if (code == error_no_more_files) break;
-            try self.emitError(visitor, mapWin32Error(code), directory, code);
+            try self.emitError(visitor, mapWin32Error(code), directory.path, code);
             break;
         }
     }
 
     fn processFindData(
         self: *Adapter,
-        directory: []const u8,
+        directory: PendingDirectory,
         find_data: *const Win32FindDataW,
         visitor: ports.FileVisitor,
-        pending_directories: *std.ArrayListUnmanaged([]u8),
+        pending_directories: *std.ArrayListUnmanaged(PendingDirectory),
     ) !void {
         const name_wide = zeroTerminatedSlice(&find_data.file_name);
         if (isDotEntry(name_wide)) return;
         const name = std.unicode.utf16LeToUtf8Alloc(self.allocator, name_wide) catch {
-            try self.emitError(visitor, .path_malformed, directory, null);
+            try self.emitError(visitor, .path_malformed, directory.path, null);
             return;
         };
         defer self.allocator.free(name);
 
-        const absolute_path = try std.fs.path.join(self.allocator, &.{ directory, name });
+        const absolute_path = try std.fs.path.join(self.allocator, &.{ directory.path, name });
         switch (mapAttributes(find_data.attributes)) {
             .directory => {
                 errdefer self.allocator.free(absolute_path);
-                try pending_directories.append(self.allocator, absolute_path);
+                try pending_directories.append(self.allocator, .{
+                    .path = absolute_path,
+                    .volume_key = directory.volume_key,
+                    .drive_class = directory.drive_class,
+                });
             },
             .skip_reparse_point => {
                 defer self.allocator.free(absolute_path);
@@ -205,7 +232,8 @@ pub const Adapter = struct {
                     .comparison_name = std.fs.path.basename(absolute_path),
                     .size = (@as(u64, find_data.file_size_high) << 32) | find_data.file_size_low,
                     .modified_ns = fileTimeToNanoseconds(find_data.last_write_time),
-                    .volume_key = volumeKeyForPath(absolute_path),
+                    .volume_key = directory.volume_key,
+                    .drive_class = directory.drive_class,
                 });
             },
         }
@@ -214,6 +242,13 @@ pub const Adapter = struct {
     fn searchPath(self: *Adapter, directory: []const u8) ![]u8 {
         const suffix: []const u8 = if (directory.len != 0 and (directory[directory.len - 1] == '\\' or directory[directory.len - 1] == '/')) "*" else "\\*";
         return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ directory, suffix });
+    }
+
+    fn classifyPath(self: *Adapter, path: []const u8) !domain.DriveClass {
+        if (path.len < 3 or path[1] != ':' or (path[2] != '\\' and path[2] != '/')) return .unknown;
+        const wide_root = try std.unicode.utf8ToUtf16LeAllocZ(self.allocator, path[0..3]);
+        defer self.allocator.free(wide_root);
+        return mapDriveType(GetDriveTypeW(wide_root.ptr));
     }
 
     fn emitError(self: *Adapter, visitor: ports.FileVisitor, kind: domain.ScanErrorKind, path: []const u8, platform_code: ?u32) !void {
@@ -275,6 +310,12 @@ pub const Adapter = struct {
         if (handle == invalid_handle) return error.Win32OpenFailed;
         return handle;
     }
+};
+
+const PendingDirectory = struct {
+    path: []u8,
+    volume_key: domain.VolumeKey,
+    drive_class: domain.DriveClass,
 };
 
 fn zeroTerminatedSlice(values: []const u16) []const u16 {

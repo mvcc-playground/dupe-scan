@@ -1,6 +1,7 @@
 const std = @import("std");
 const domain = @import("domain");
 const ports = @import("ports");
+const scheduler = @import("scheduler");
 
 const sample_size: u64 = 64 * 1024;
 const worker_buffer_size = 256 * 1024;
@@ -68,6 +69,7 @@ pub const ScanResult = struct {
     errors: []domain.ScanError,
     grouping: Grouping,
     metrics: domain.Metrics,
+    worker_plan: []domain.VolumeReaderPlan,
 
     pub fn deinit(self: *ScanResult) void {
         self.grouping.deinit();
@@ -75,17 +77,21 @@ pub const ScanResult = struct {
         for (self.errors) |scan_error| self.allocator.free(scan_error.path);
         if (self.records.len != 0) self.allocator.free(self.records);
         if (self.errors.len != 0) self.allocator.free(self.errors);
+        if (self.worker_plan.len != 0) self.allocator.free(self.worker_plan);
         self.records = &.{};
         self.errors = &.{};
+        self.worker_plan = &.{};
     }
 };
 
 pub fn scan(
     allocator: std.mem.Allocator,
+    io: std.Io,
     request: domain.ScanRequest,
     walker: ports.DirectoryWalker,
     reader: ports.FileReader,
 ) !ScanResult {
+    const started = std.Io.Timestamp.now(io, .awake);
     var collector = RecordCollector.init(allocator);
     errdefer collector.deinit();
 
@@ -120,25 +126,33 @@ pub fn scan(
     defer allocator.free(full_candidates);
     collector.metrics.sample_candidates = @intCast(full_candidates.len);
 
+    collector.metrics.full_hashes = @intCast(full_candidates.len);
+    var batch = try hashCandidates(allocator, io, request.workers, collector.records.items, full_candidates, reader);
+    defer batch.deinit(allocator);
+
     var hashed: std.ArrayListUnmanaged(HashedRecord) = .empty;
     defer hashed.deinit(allocator);
-    for (full_candidates) |record_index| {
-        const record = collector.records.items[record_index];
-        collector.metrics.full_hashes += 1;
-        const digest = reader.full_hash(reader.context, record.absolute_path, record.size, buffer) catch |err| {
-            try collector.appendReadError(record.absolute_path, err);
-            continue;
-        };
-        collector.metrics.bytes_read += record.size;
-        try hashed.append(allocator, .{ .record = record, .digest = digest });
+    for (batch.outcomes, 0..) |outcome, position| {
+        const record = collector.records.items[full_candidates[position]];
+        switch (outcome.?) {
+            .digest => |digest| {
+                collector.metrics.bytes_read += record.size;
+                try hashed.append(allocator, .{ .record = record, .digest = digest });
+            },
+            .failed => |err| try collector.appendReadError(record.absolute_path, err),
+        }
     }
 
     var grouping = try buildGroups(allocator, hashed.items);
     errdefer grouping.deinit();
+    const worker_plan = batch.takeWorkerPlan();
+    errdefer if (worker_plan.len != 0) allocator.free(worker_plan);
     const records = try collector.records.toOwnedSlice(allocator);
     errdefer freeRecords(allocator, records);
     const errors = try collector.errors.toOwnedSlice(allocator);
     errdefer freeErrors(allocator, errors);
+    const elapsed = started.untilNow(io, .awake).toNanoseconds();
+    collector.metrics.elapsed_ns = @intCast(@max(elapsed, 0));
 
     return .{
         .allocator = allocator,
@@ -146,7 +160,186 @@ pub fn scan(
         .errors = errors,
         .grouping = grouping,
         .metrics = collector.metrics,
+        .worker_plan = worker_plan,
     };
+}
+
+const HashOutcome = union(enum) {
+    digest: domain.ContentHash,
+    failed: anyerror,
+};
+
+const HashBatch = struct {
+    outcomes: []?HashOutcome,
+    worker_plan: []domain.VolumeReaderPlan = &.{},
+
+    fn deinit(self: *HashBatch, allocator: std.mem.Allocator) void {
+        allocator.free(self.outcomes);
+        if (self.worker_plan.len != 0) allocator.free(self.worker_plan);
+        self.outcomes = &.{};
+        self.worker_plan = &.{};
+    }
+
+    fn takeWorkerPlan(self: *HashBatch) []domain.VolumeReaderPlan {
+        const worker_plan = self.worker_plan;
+        self.worker_plan = &.{};
+        return worker_plan;
+    }
+};
+
+const VolumeJobs = struct {
+    key: domain.VolumeKey,
+    class: domain.DriveClass,
+    positions: std.ArrayListUnmanaged(usize) = .empty,
+    next_position: usize = 0,
+    mutex: std.Io.Mutex = .init,
+
+    fn deinit(self: *VolumeJobs, allocator: std.mem.Allocator) void {
+        self.positions.deinit(allocator);
+    }
+};
+
+const HashState = struct {
+    io: std.Io,
+    reader: ports.FileReader,
+    records: []const domain.FileRecord,
+    candidate_indexes: []const usize,
+    jobs: []VolumeJobs,
+    outcomes: []?HashOutcome,
+
+    fn takePosition(self: *HashState, volume_index: usize) ?usize {
+        const job = &self.jobs[volume_index];
+        job.mutex.lockUncancelable(self.io);
+        defer job.mutex.unlock(self.io);
+        if (job.next_position == job.positions.items.len) return null;
+        const position = job.positions.items[job.next_position];
+        job.next_position += 1;
+        return position;
+    }
+};
+
+const HashWorker = struct {
+    state: *HashState,
+    volume_index: usize,
+
+    fn run(self: *HashWorker) void {
+        var buffer: [worker_buffer_size]u8 = undefined;
+        while (self.state.takePosition(self.volume_index)) |position| {
+            const record = self.state.records[self.state.candidate_indexes[position]];
+            const outcome: HashOutcome = blk: {
+                const digest = self.state.reader.full_hash(
+                    self.state.reader.context,
+                    record.absolute_path,
+                    record.size,
+                    &buffer,
+                ) catch |err| break :blk .{ .failed = err };
+                break :blk .{ .digest = digest };
+            };
+            self.state.outcomes[position] = outcome;
+        }
+    }
+};
+
+fn hashCandidates(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    workers: domain.WorkerLimit,
+    records: []const domain.FileRecord,
+    candidate_indexes: []const usize,
+    reader: ports.FileReader,
+) !HashBatch {
+    const outcomes = try allocator.alloc(?HashOutcome, candidate_indexes.len);
+    errdefer allocator.free(outcomes);
+    @memset(outcomes, null);
+    if (candidate_indexes.len == 0) return .{ .outcomes = outcomes };
+
+    var jobs = try buildVolumeJobs(allocator, records, candidate_indexes);
+    defer deinitVolumeJobs(allocator, &jobs);
+
+    const queues = try allocator.alloc(scheduler.VolumeQueue, jobs.items.len);
+    defer allocator.free(queues);
+    for (jobs.items, queues) |job, *queue| {
+        queue.* = .{ .key = job.key, .class = job.class, .pending = job.positions.items.len };
+    }
+
+    var worker_plan = try scheduler.plan(allocator, queues, workers);
+    defer worker_plan.deinit();
+    const worker_count = worker_plan.totalReaders();
+    if (worker_count == 0) return error.InvalidWorkerCount;
+    const reported_plan = try allocator.alloc(domain.VolumeReaderPlan, jobs.items.len);
+    errdefer allocator.free(reported_plan);
+    for (jobs.items, reported_plan) |job, *entry| {
+        entry.* = .{
+            .key = job.key,
+            .drive_class = job.class,
+            .pending_jobs = job.positions.items.len,
+            .readers = worker_plan.readerCountFor(job.key),
+        };
+    }
+
+    var state = HashState{
+        .io = io,
+        .reader = reader,
+        .records = records,
+        .candidate_indexes = candidate_indexes,
+        .jobs = jobs.items,
+        .outcomes = outcomes,
+    };
+    const worker_infos = try allocator.alloc(HashWorker, worker_count);
+    defer allocator.free(worker_infos);
+    var threads: std.ArrayListUnmanaged(std.Thread) = .empty;
+    defer threads.deinit(allocator);
+    errdefer for (threads.items) |thread| thread.join();
+
+    var written: usize = 0;
+    for (jobs.items, 0..) |job, volume_index| {
+        var count = worker_plan.readerCountFor(job.key);
+        while (count != 0) : (count -= 1) {
+            worker_infos[written] = .{ .state = &state, .volume_index = volume_index };
+            const thread = try std.Thread.spawn(.{}, HashWorker.run, .{&worker_infos[written]});
+            threads.append(allocator, thread) catch |err| {
+                thread.join();
+                return err;
+            };
+            written += 1;
+        }
+    }
+    for (threads.items) |thread| thread.join();
+
+    return .{ .outcomes = outcomes, .worker_plan = reported_plan };
+}
+
+fn buildVolumeJobs(
+    allocator: std.mem.Allocator,
+    records: []const domain.FileRecord,
+    candidate_indexes: []const usize,
+) !std.ArrayListUnmanaged(VolumeJobs) {
+    var jobs: std.ArrayListUnmanaged(VolumeJobs) = .empty;
+    errdefer deinitVolumeJobs(allocator, &jobs);
+
+    for (candidate_indexes, 0..) |record_index, position| {
+        const record = records[record_index];
+        const job_index = try findOrCreateVolumeJob(allocator, &jobs, record);
+        try jobs.items[job_index].positions.append(allocator, position);
+    }
+    return jobs;
+}
+
+fn findOrCreateVolumeJob(
+    allocator: std.mem.Allocator,
+    jobs: *std.ArrayListUnmanaged(VolumeJobs),
+    record: domain.FileRecord,
+) !usize {
+    for (jobs.items, 0..) |job, index| {
+        if (job.key.eql(record.volume_key)) return index;
+    }
+    try jobs.append(allocator, .{ .key = record.volume_key, .class = record.drive_class });
+    return jobs.items.len - 1;
+}
+
+fn deinitVolumeJobs(allocator: std.mem.Allocator, jobs: *std.ArrayListUnmanaged(VolumeJobs)) void {
+    for (jobs.items) |*job| job.deinit(allocator);
+    jobs.deinit(allocator);
 }
 
 pub fn bucketBySize(allocator: std.mem.Allocator, records: []const domain.FileRecord) !SizeBuckets {

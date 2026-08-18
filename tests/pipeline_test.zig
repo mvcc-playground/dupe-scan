@@ -1,6 +1,55 @@
 const std = @import("std");
 const domain = @import("domain");
 const pipeline = @import("pipeline");
+const ports = @import("ports");
+
+const ConcurrentReader = struct {
+    active: u8 = 0,
+    maximum_active: u8 = 0,
+    mutex: std.Io.Mutex = .init,
+
+    fn fingerprint(_: *anyopaque, _: []const u8, _: u64, _: []u8) anyerror!domain.Fingerprint {
+        return .{ .first = digest(1), .last = digest(1) };
+    }
+
+    fn fullHash(context: *anyopaque, _: []const u8, _: u64, _: []u8) anyerror!domain.ContentHash {
+        const self: *ConcurrentReader = @ptrCast(@alignCast(context));
+        self.mutex.lockUncancelable(std.testing.io);
+        self.active += 1;
+        self.maximum_active = @max(self.maximum_active, self.active);
+        self.mutex.unlock(std.testing.io);
+        try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(25), .awake);
+        self.mutex.lockUncancelable(std.testing.io);
+        self.active -= 1;
+        self.mutex.unlock(std.testing.io);
+        return digest(9);
+    }
+
+    fn port(self: *ConcurrentReader) ports.FileReader {
+        return .{ .context = @ptrCast(self), .fingerprint = fingerprint, .full_hash = fullHash };
+    }
+};
+
+const FixedVolumeWalker = struct {
+    fn walk(_: *anyopaque, _: []const u8, visitor: ports.FileVisitor) anyerror!void {
+        for ([_][]const u8{ "one.bin", "two.bin", "three.bin" }) |path| {
+            const owned_path = try std.testing.allocator.dupe(u8, path);
+            errdefer std.testing.allocator.free(owned_path);
+            try visitor.on_file(visitor.context, .{
+                .absolute_path = owned_path,
+                .comparison_name = owned_path,
+                .size = 100,
+                .modified_ns = 0,
+                .volume_key = .{ .raw = 1 },
+                .drive_class = .fixed,
+            });
+        }
+    }
+
+    fn port(self: *FixedVolumeWalker) ports.DirectoryWalker {
+        return .{ .context = @ptrCast(self), .walk = walk };
+    }
+};
 
 fn record(path: []const u8, name: []const u8, size: u64) domain.FileRecord {
     return .{
@@ -66,4 +115,19 @@ test "sample matching requires both the first and last sample digest" {
 
     try std.testing.expect(pipeline.sampleMatches(full_match, full_match));
     try std.testing.expect(!pipeline.sampleMatches(full_match, different_end));
+}
+
+test "full hashing uses two readers for fixed-volume candidates when capped at two" {
+    var walker = FixedVolumeWalker{};
+    var reader = ConcurrentReader{};
+    var result = try pipeline.scan(
+        std.testing.allocator,
+        std.testing.io,
+        .{ .roots = &.{"fixture"}, .workers = .{ .explicit = 2 } },
+        walker.port(),
+        reader.port(),
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(u8, 2), reader.maximum_active);
 }

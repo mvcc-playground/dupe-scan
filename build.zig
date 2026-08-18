@@ -17,6 +17,13 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "domain", .module = domain_module }},
     });
 
+    const scheduler_module = b.createModule(.{
+        .root_source_file = b.path("src/scheduler.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "domain", .module = domain_module }},
+    });
+
     const pipeline_module = b.createModule(.{
         .root_source_file = b.path("src/pipeline.zig"),
         .target = target,
@@ -24,6 +31,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "domain", .module = domain_module },
             .{ .name = "ports", .module = ports_module },
+            .{ .name = "scheduler", .module = scheduler_module },
         },
     });
 
@@ -44,7 +52,6 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "domain", .module = domain_module },
             .{ .name = "ports", .module = ports_module },
-            .{ .name = "portable", .module = portable_module },
         },
     });
 
@@ -77,6 +84,16 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(executable);
 
+    const run_command = b.addRunArtifact(executable);
+    if (b.args) |args| run_command.addArgs(args);
+    const run_step = b.step("run", "Run the read-only duplicate scanner");
+    run_step.dependOn(&run_command.step);
+
+    const bench_command = b.addRunArtifact(executable);
+    if (b.args) |args| bench_command.addArgs(args);
+    const bench_step = b.step("bench", "Run a scanner benchmark on explicitly supplied roots");
+    bench_step.dependOn(&bench_command.step);
+
     const test_module = b.createModule(.{
         .root_source_file = b.path("tests/test_root.zig"),
         .target = target,
@@ -85,6 +102,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "domain", .module = domain_module },
             .{ .name = "ports", .module = ports_module },
             .{ .name = "pipeline", .module = pipeline_module },
+            .{ .name = "scheduler", .module = scheduler_module },
             .{ .name = "portable", .module = portable_module },
             .{ .name = "report_jsonl", .module = report_module },
             .{ .name = "main", .module = main_module },

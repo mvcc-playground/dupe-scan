@@ -22,6 +22,7 @@ test "portable scan finds real duplicate bytes and same-name collisions" {
     var adapter = portable.Adapter.init(std.testing.allocator, std.testing.io);
     var result = try pipeline.scan(
         std.testing.allocator,
+        std.testing.io,
         .{ .roots = &.{relative_root}, .workers = .auto, .backend = .portable },
         adapter.directoryWalker(),
         adapter.fileReader(),
@@ -47,6 +48,7 @@ test "portable scan records a missing root without aborting its other roots" {
     var adapter = portable.Adapter.init(std.testing.allocator, std.testing.io);
     var result = try pipeline.scan(
         std.testing.allocator,
+        std.testing.io,
         .{ .roots = &.{ "does-not-exist-for-dupe-scan", present }, .workers = .auto, .backend = .portable },
         adapter.directoryWalker(),
         adapter.fileReader(),

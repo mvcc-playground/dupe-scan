@@ -11,7 +11,7 @@ pub const JsonlReporter = struct {
 
     pub fn writeResult(self: *JsonlReporter, backend: domain.Backend, result: *const pipeline.ScanResult) !void {
         for (result.errors) |scan_error| try self.writeError(scan_error);
-        try self.writeGroupsAndSummary(backend, result.grouping, result.metrics);
+        try self.writeGroupsAndSummaryWithPlan(backend, result.grouping, result.metrics, result.worker_plan);
     }
 
     pub fn writeGroupsAndSummary(
@@ -20,9 +20,19 @@ pub const JsonlReporter = struct {
         grouping: pipeline.Grouping,
         metrics: domain.Metrics,
     ) !void {
+        try self.writeGroupsAndSummaryWithPlan(backend, grouping, metrics, &.{});
+    }
+
+    fn writeGroupsAndSummaryWithPlan(
+        self: *JsonlReporter,
+        backend: domain.Backend,
+        grouping: pipeline.Grouping,
+        metrics: domain.Metrics,
+        worker_plan: []const domain.VolumeReaderPlan,
+    ) !void {
         for (grouping.duplicates) |group| try self.writeDuplicateGroup(group);
         for (grouping.name_collisions) |group| try self.writeCollisionGroup(group);
-        try self.writeSummary(backend, metrics);
+        try self.writeSummary(backend, metrics, worker_plan);
     }
 
     fn writeDuplicateGroup(self: *JsonlReporter, group: pipeline.DuplicateGroup) !void {
@@ -49,9 +59,14 @@ pub const JsonlReporter = struct {
         try self.writer.writeAll("\"}\n");
     }
 
-    fn writeSummary(self: *JsonlReporter, backend: domain.Backend, metrics: domain.Metrics) !void {
+    fn writeSummary(
+        self: *JsonlReporter,
+        backend: domain.Backend,
+        metrics: domain.Metrics,
+        worker_plan: []const domain.VolumeReaderPlan,
+    ) !void {
         try self.writer.print(
-            "{{\"schema_version\":1,\"event\":\"scan_summary\",\"backend\":\"{s}\",\"files_enumerated\":{d},\"bytes_enumerated\":{d},\"size_candidates\":{d},\"sample_candidates\":{d},\"full_hashes\":{d},\"bytes_read\":{d},\"skipped_entries\":{d},\"recoverable_errors\":{d},\"elapsed_ns\":{d}}}\n",
+            "{{\"schema_version\":1,\"event\":\"scan_summary\",\"backend\":\"{s}\",\"files_enumerated\":{d},\"bytes_enumerated\":{d},\"size_candidates\":{d},\"sample_candidates\":{d},\"full_hashes\":{d},\"bytes_read\":{d},\"skipped_entries\":{d},\"recoverable_errors\":{d},\"elapsed_ns\":{d},\"worker_plan\":[",
             .{
                 @tagName(backend),
                 metrics.files_enumerated,
@@ -65,6 +80,14 @@ pub const JsonlReporter = struct {
                 metrics.elapsed_ns,
             },
         );
+        for (worker_plan, 0..) |entry, index| {
+            if (index != 0) try self.writer.writeByte(',');
+            try self.writer.print(
+                "{{\"volume_key\":{d},\"drive_class\":\"{s}\",\"pending_jobs\":{d},\"readers\":{d}}}",
+                .{ entry.key.raw, @tagName(entry.drive_class), entry.pending_jobs, entry.readers },
+            );
+        }
+        try self.writer.writeAll("]}\n");
     }
 };
 

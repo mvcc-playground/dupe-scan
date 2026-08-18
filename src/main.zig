@@ -108,10 +108,10 @@ fn renderRequest(allocator: std.mem.Allocator, io: std.Io, request: domain.ScanR
         (request.backend == .auto and builtin.os.tag == .windows);
     var result = if (use_windows) blk: {
         var adapter = windows.Adapter.init(allocator, io);
-        break :blk try pipeline.scan(allocator, request, adapter.directoryWalker(), adapter.fileReader());
+        break :blk try pipeline.scan(allocator, io, request, adapter.directoryWalker(), adapter.fileReader());
     } else blk: {
         var adapter = portable.Adapter.init(allocator, io);
-        break :blk try pipeline.scan(allocator, request, adapter.directoryWalker(), adapter.fileReader());
+        break :blk try pipeline.scan(allocator, io, request, adapter.directoryWalker(), adapter.fileReader());
     };
     defer result.deinit();
 

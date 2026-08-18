@@ -5,11 +5,13 @@ const windows = @import("windows");
 const WalkProbe = struct {
     files: usize = 0,
     volume_key: domain.VolumeKey = .{ .raw = 0 },
+    drive_class: domain.DriveClass = .unknown,
 
     fn onFile(context: *anyopaque, record: domain.FileRecord) anyerror!void {
         const self: *WalkProbe = @ptrCast(@alignCast(context));
         self.files += 1;
         self.volume_key = record.volume_key;
+        self.drive_class = record.drive_class;
         std.testing.allocator.free(record.absolute_path);
     }
 
@@ -24,6 +26,12 @@ test "native walker rejects reparse points before entering them" {
         windows.EntryKind.skip_reparse_point,
         windows.mapAttributes(windows.file_attribute_reparse_point),
     );
+}
+
+test "native drive mapping keeps removable storage at one-reader class" {
+    try std.testing.expectEqual(domain.DriveClass.removable, windows.mapDriveType(windows.drive_type_removable));
+    try std.testing.expectEqual(domain.DriveClass.fixed, windows.mapDriveType(windows.drive_type_fixed));
+    try std.testing.expectEqual(domain.DriveClass.remote, windows.mapDriveType(windows.drive_type_remote));
 }
 
 test "native Windows walker emits an enumerated file with a volume key" {
@@ -47,6 +55,7 @@ test "native Windows walker emits an enumerated file with a volume key" {
 
     try std.testing.expectEqual(@as(usize, 1), probe.files);
     try std.testing.expect(probe.volume_key.raw != 0);
+    try std.testing.expectEqual(domain.DriveClass.fixed, probe.drive_class);
 }
 
 test "native Windows reader hashes a temporary file with BLAKE3" {
