@@ -2,7 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const domain = @import("domain");
 const ports = @import("ports");
-const portable = @import("portable");
 
 const Handle = usize;
 const invalid_handle = std.math.maxInt(Handle);
@@ -16,6 +15,55 @@ const file_flag_sequential_scan: u32 = 0x08000000;
 const file_flag_open_reparse_point: u32 = 0x00200000;
 const file_begin: u32 = 0;
 const sample_size: u64 = 64 * 1024;
+const find_ex_info_basic: u32 = 1;
+const find_ex_search_name_match: u32 = 0;
+const find_first_ex_large_fetch: u32 = 0x00000002;
+const error_no_more_files: u32 = 18;
+
+pub const file_attribute_directory: u32 = 0x00000010;
+pub const file_attribute_reparse_point: u32 = 0x00000400;
+
+pub const EntryKind = enum {
+    file,
+    directory,
+    skip_reparse_point,
+};
+
+pub fn mapAttributes(attributes: u32) EntryKind {
+    if ((attributes & file_attribute_reparse_point) != 0) return .skip_reparse_point;
+    if ((attributes & file_attribute_directory) != 0) return .directory;
+    return .file;
+}
+
+const FileTime = extern struct {
+    low: u32,
+    high: u32,
+};
+
+const Win32FindDataW = extern struct {
+    attributes: u32,
+    creation_time: FileTime,
+    last_access_time: FileTime,
+    last_write_time: FileTime,
+    file_size_high: u32,
+    file_size_low: u32,
+    reserved0: u32,
+    reserved1: u32,
+    file_name: [260]u16,
+    alternate_file_name: [14]u16,
+};
+
+extern "kernel32" fn FindFirstFileExW(
+    file_name: [*:0]const u16,
+    info_level: u32,
+    find_data: *Win32FindDataW,
+    search_op: u32,
+    search_filter: ?*anyopaque,
+    additional_flags: u32,
+) callconv(.winapi) Handle;
+extern "kernel32" fn FindNextFileW(handle: Handle, find_data: *Win32FindDataW) callconv(.winapi) i32;
+extern "kernel32" fn FindClose(handle: Handle) callconv(.winapi) i32;
+extern "kernel32" fn GetLastError() callconv(.winapi) u32;
 
 extern "kernel32" fn CreateFileW(
     file_name: [*:0]const u16,
@@ -44,22 +92,134 @@ extern "kernel32" fn SetFilePointerEx(
 pub const Adapter = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    portable_adapter: portable.Adapter,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) Adapter {
         return .{
             .allocator = allocator,
             .io = io,
-            .portable_adapter = portable.Adapter.init(allocator, io),
         };
     }
 
     pub fn directoryWalker(self: *Adapter) ports.DirectoryWalker {
-        return self.portable_adapter.directoryWalker();
+        return .{ .context = @ptrCast(self), .walk = walk };
     }
 
     pub fn fileReader(self: *Adapter) ports.FileReader {
         return .{ .context = @ptrCast(self), .fingerprint = fingerprint, .full_hash = fullHash };
+    }
+
+    fn walk(context: *anyopaque, root: []const u8, visitor: ports.FileVisitor) anyerror!void {
+        const self: *Adapter = @ptrCast(@alignCast(context));
+        if (builtin.os.tag != .windows) return error.UnsupportedBackend;
+
+        const absolute_root = std.Io.Dir.cwd().realPathFileAlloc(self.io, root, self.allocator) catch |err| {
+            try self.emitError(visitor, mapPathError(err), root, null);
+            return;
+        };
+        defer self.allocator.free(absolute_root);
+
+        var pending_directories: std.ArrayListUnmanaged([]u8) = .empty;
+        const root_directory = try self.allocator.dupe(u8, absolute_root);
+        pending_directories.append(self.allocator, root_directory) catch |err| {
+            self.allocator.free(root_directory);
+            return err;
+        };
+        defer {
+            for (pending_directories.items) |directory| self.allocator.free(directory);
+            pending_directories.deinit(self.allocator);
+        }
+
+        while (pending_directories.pop()) |directory| {
+            defer self.allocator.free(directory);
+            try self.walkDirectory(directory, visitor, &pending_directories);
+        }
+    }
+
+    fn walkDirectory(
+        self: *Adapter,
+        directory: []const u8,
+        visitor: ports.FileVisitor,
+        pending_directories: *std.ArrayListUnmanaged([]u8),
+    ) !void {
+        const search_path = try self.searchPath(directory);
+        defer self.allocator.free(search_path);
+        const wide_search_path = try extendedWidePath(self.allocator, search_path);
+        defer self.allocator.free(wide_search_path);
+
+        var find_data: Win32FindDataW = undefined;
+        const find_handle = FindFirstFileExW(
+            wide_search_path.ptr,
+            find_ex_info_basic,
+            &find_data,
+            find_ex_search_name_match,
+            null,
+            find_first_ex_large_fetch,
+        );
+        if (find_handle == invalid_handle) {
+            const code = GetLastError();
+            try self.emitError(visitor, mapWin32Error(code), directory, code);
+            return;
+        }
+        defer _ = FindClose(find_handle);
+
+        while (true) {
+            try self.processFindData(directory, &find_data, visitor, pending_directories);
+            if (FindNextFileW(find_handle, &find_data) != 0) continue;
+
+            const code = GetLastError();
+            if (code == error_no_more_files) break;
+            try self.emitError(visitor, mapWin32Error(code), directory, code);
+            break;
+        }
+    }
+
+    fn processFindData(
+        self: *Adapter,
+        directory: []const u8,
+        find_data: *const Win32FindDataW,
+        visitor: ports.FileVisitor,
+        pending_directories: *std.ArrayListUnmanaged([]u8),
+    ) !void {
+        const name_wide = zeroTerminatedSlice(&find_data.file_name);
+        if (isDotEntry(name_wide)) return;
+        const name = std.unicode.utf16LeToUtf8Alloc(self.allocator, name_wide) catch {
+            try self.emitError(visitor, .path_malformed, directory, null);
+            return;
+        };
+        defer self.allocator.free(name);
+
+        const absolute_path = try std.fs.path.join(self.allocator, &.{ directory, name });
+        switch (mapAttributes(find_data.attributes)) {
+            .directory => {
+                errdefer self.allocator.free(absolute_path);
+                try pending_directories.append(self.allocator, absolute_path);
+            },
+            .skip_reparse_point => {
+                defer self.allocator.free(absolute_path);
+                try self.emitError(visitor, .skipped_reparse_point, absolute_path, null);
+            },
+            .file => {
+                errdefer self.allocator.free(absolute_path);
+                try visitor.on_file(visitor.context, .{
+                    .absolute_path = absolute_path,
+                    .comparison_name = std.fs.path.basename(absolute_path),
+                    .size = (@as(u64, find_data.file_size_high) << 32) | find_data.file_size_low,
+                    .modified_ns = fileTimeToNanoseconds(find_data.last_write_time),
+                    .volume_key = volumeKeyForPath(absolute_path),
+                });
+            },
+        }
+    }
+
+    fn searchPath(self: *Adapter, directory: []const u8) ![]u8 {
+        const suffix: []const u8 = if (directory.len != 0 and (directory[directory.len - 1] == '\\' or directory[directory.len - 1] == '/')) "*" else "\\*";
+        return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ directory, suffix });
+    }
+
+    fn emitError(self: *Adapter, visitor: ports.FileVisitor, kind: domain.ScanErrorKind, path: []const u8, platform_code: ?u32) !void {
+        const owned_path = try self.allocator.dupe(u8, path);
+        errdefer self.allocator.free(owned_path);
+        try visitor.on_error(visitor.context, .{ .kind = kind, .path = owned_path, .platform_code = platform_code });
     }
 
     fn fingerprint(context: *anyopaque, path: []const u8, size: u64, buffer: []u8) anyerror!domain.Fingerprint {
@@ -116,6 +276,48 @@ pub const Adapter = struct {
         return handle;
     }
 };
+
+fn zeroTerminatedSlice(values: []const u16) []const u16 {
+    for (values, 0..) |value, index| {
+        if (value == 0) return values[0..index];
+    }
+    return values;
+}
+
+fn isDotEntry(name: []const u16) bool {
+    return (name.len == 1 and name[0] == '.') or
+        (name.len == 2 and name[0] == '.' and name[1] == '.');
+}
+
+fn fileTimeToNanoseconds(time: FileTime) i128 {
+    const ticks = (@as(u64, time.high) << 32) | time.low;
+    return @as(i128, ticks) * 100;
+}
+
+fn volumeKeyForPath(path: []const u8) domain.VolumeKey {
+    if (path.len >= 2 and path[1] == ':') {
+        return .{ .raw = @as(u64, std.ascii.toUpper(path[0])) + 1 };
+    }
+    return .{ .raw = 1 };
+}
+
+fn mapWin32Error(code: u32) domain.ScanErrorKind {
+    return switch (code) {
+        2, 3 => .root_not_found,
+        5 => .access_denied,
+        32, 33 => .sharing_violation,
+        else => .read_failed,
+    };
+}
+
+fn mapPathError(source: anyerror) domain.ScanErrorKind {
+    return switch (source) {
+        error.FileNotFound, error.NotDir => .root_not_found,
+        error.AccessDenied, error.PermissionDenied => .access_denied,
+        error.LockViolation, error.FileBusy => .sharing_violation,
+        else => .read_failed,
+    };
+}
 
 fn readExactly(handle: Handle, offset: u64, buffer: []u8) !void {
     if (buffer.len == 0) return;

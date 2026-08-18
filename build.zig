@@ -83,6 +83,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "domain", .module = domain_module },
+            .{ .name = "ports", .module = ports_module },
             .{ .name = "pipeline", .module = pipeline_module },
             .{ .name = "portable", .module = portable_module },
             .{ .name = "report_jsonl", .module = report_module },
