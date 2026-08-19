@@ -78,6 +78,16 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const text_report_module = b.createModule(.{
+        .root_source_file = b.path("src/report_text.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "domain", .module = domain_module },
+            .{ .name = "pipeline", .module = pipeline_module },
+        },
+    });
+
     const main_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -88,6 +98,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "pipeline", .module = pipeline_module },
             .{ .name = "portable", .module = portable_module },
             .{ .name = "report_jsonl", .module = report_module },
+            .{ .name = "report_text", .module = text_report_module },
             .{ .name = "windows", .module = windows_module },
             .{ .name = "progress_console", .module = progress_console_module },
             .{ .name = "zio", .module = zio_module },
@@ -121,6 +132,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "scheduler", .module = scheduler_module },
             .{ .name = "portable", .module = portable_module },
             .{ .name = "report_jsonl", .module = report_module },
+            .{ .name = "report_text", .module = text_report_module },
             .{ .name = "main", .module = main_module },
             .{ .name = "windows", .module = windows_module },
             .{ .name = "progress_console", .module = progress_console_module },

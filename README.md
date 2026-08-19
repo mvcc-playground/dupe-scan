@@ -32,12 +32,19 @@ Para salvar diretamente em um arquivo novo:
 zig build run -- 'D:\Backup' --output resultado.jsonl
 ```
 
+No terminal interativo, a saida humana (`text`) e escolhida automaticamente e os caminhos podem ser clicados no Windows Terminal. Para forcar um formato:
+
+```text
+zig build run -- 'D:\Backup' --format text
+zig build run -- 'D:\Backup' --format jsonl > resultado.jsonl
+```
+
 O caminho de `--output` não pode existir: isso evita sobrescrever dados por engano.
 
 ## Opções
 
 ```text
-dupe-scan <raiz>... [--output <arquivo>] [--workers auto|N] [--exclude <diretório>] [--backend auto|portable|win32]
+dupe-scan <raiz>... [--output <arquivo>] [--format text|jsonl] [--workers auto|N] [--exclude <diretório>] [--backend auto|portable|win32]
 ```
 
 - `--workers auto` aplica limites por volume; `N` define um teto global (limitado a 32 leitores para manter o sistema responsivo).

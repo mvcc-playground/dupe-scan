@@ -5,6 +5,7 @@ const ports = @import("ports");
 const pipeline = @import("pipeline");
 const portable = @import("portable");
 const report_jsonl = @import("report_jsonl");
+const report_text = @import("report_text");
 const windows = @import("windows");
 const progress_console = @import("progress_console");
 const zio = @import("zio");
@@ -38,6 +39,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Parsed
     var output_path: ?[]const u8 = null;
     var workers: domain.WorkerLimit = .auto;
     var backend: domain.Backend = .auto;
+    var format: domain.OutputFormat = .jsonl;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const argument = args[index];
@@ -54,6 +56,10 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Parsed
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
             backend = try parseBackend(args[index]);
+        } else if (std.mem.eql(u8, argument, "--format")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            format = try parseFormat(args[index]);
         } else if (std.mem.eql(u8, argument, "--exclude")) {
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
@@ -74,6 +80,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Parsed
             .output_path = output_path,
             .workers = workers,
             .backend = backend,
+            .format = format,
         },
     };
 }
@@ -88,7 +95,7 @@ pub fn runWithWriter(
     defer parsed.deinit();
     if (parsed.request.output_path != null) return error.OutputPathRequiresFileExecution;
 
-    const jsonl = try renderRequest(allocator, io, parsed.request, null);
+    const jsonl = try renderRequest(allocator, io, parsed.request, null, false);
     defer allocator.free(jsonl);
     try writer.writeAll(jsonl);
 }
@@ -115,14 +122,17 @@ pub fn main(init: std.process.Init) !void {
 
     var parsed = try parseArgs(init.gpa, args.items);
     defer parsed.deinit();
+    const stdout = std.Io.File.stdout();
+    const stdout_is_tty = stdout.isTty(io) catch false;
+    if (parsed.request.output_path == null and !hasFormatOption(args.items) and stdout_is_tty) parsed.request.format = .text;
     if (parsed.request.output_path) |output_path| {
         var report_file = try createExclusiveReport(io, output_path);
         defer report_file.close(io);
-        const jsonl = try renderWithProgress(io, init.gpa, parsed.request);
+        const jsonl = try renderWithProgress(io, init.gpa, parsed.request, false);
         defer init.gpa.free(jsonl);
         try report_file.writeStreamingAll(io, jsonl);
     } else {
-        const jsonl = try renderWithProgress(io, init.gpa, parsed.request);
+        const jsonl = try renderWithProgress(io, init.gpa, parsed.request, stdout_is_tty);
         defer init.gpa.free(jsonl);
         try std.Io.File.stdout().writeStreamingAll(io, jsonl);
     }
@@ -132,15 +142,15 @@ pub fn createExclusiveReport(io: std.Io, path: []const u8) !std.Io.File {
     return std.Io.Dir.cwd().createFile(io, path, .{ .exclusive = true });
 }
 
-fn renderWithProgress(io: std.Io, allocator: std.mem.Allocator, request: domain.ScanRequest) ![]u8 {
+fn renderWithProgress(io: std.Io, allocator: std.mem.Allocator, request: domain.ScanRequest, hyperlinks: bool) ![]u8 {
     var stderr_buffer: [1024]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
     const is_tty = std.Io.File.stderr().isTty(io) catch false;
     var progress = progress_console.Renderer.init(io, &stderr_writer.interface, is_tty);
-    return renderRequest(allocator, io, request, progress.observer());
+    return renderRequest(allocator, io, request, progress.observer(), hyperlinks);
 }
 
-fn renderRequest(allocator: std.mem.Allocator, io: std.Io, request: domain.ScanRequest, progress: ?ports.ProgressObserver) ![]u8 {
+fn renderRequest(allocator: std.mem.Allocator, io: std.Io, request: domain.ScanRequest, progress: ?ports.ProgressObserver, hyperlinks: bool) ![]u8 {
     if (request.backend == .win32 and builtin.os.tag != .windows) return error.UnsupportedBackend;
     const use_windows = request.backend == .win32 or
         (request.backend == .auto and builtin.os.tag == .windows);
@@ -157,8 +167,13 @@ fn renderRequest(allocator: std.mem.Allocator, io: std.Io, request: domain.ScanR
 
     var output: std.Io.Writer.Allocating = .init(allocator);
     errdefer output.deinit();
-    var reporter = report_jsonl.JsonlReporter.init(&output.writer);
-    try reporter.writeResult(if (use_windows) .win32 else .portable, &result);
+    if (request.format == .text) {
+        var reporter = report_text.TextReporter.init(&output.writer, hyperlinks);
+        try reporter.writeResult(&result);
+    } else {
+        var reporter = report_jsonl.JsonlReporter.init(&output.writer);
+        try reporter.writeResult(if (use_windows) .win32 else .portable, &result);
+    }
     return output.toOwnedSlice();
 }
 
@@ -174,5 +189,16 @@ fn parseBackend(value: []const u8) !domain.Backend {
     if (std.mem.eql(u8, value, "portable")) return .portable;
     if (std.mem.eql(u8, value, "win32")) return .win32;
     return error.InvalidBackend;
+}
+
+fn parseFormat(value: []const u8) !domain.OutputFormat {
+    if (std.mem.eql(u8, value, "jsonl")) return .jsonl;
+    if (std.mem.eql(u8, value, "text")) return .text;
+    return error.InvalidFormat;
+}
+
+fn hasFormatOption(args: []const []const u8) bool {
+    for (args) |argument| if (std.mem.eql(u8, argument, "--format")) return true;
+    return false;
 }
 

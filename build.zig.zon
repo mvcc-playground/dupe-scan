@@ -15,6 +15,7 @@
         "mise.toml",
         "README.md",
         "ADR.md",
+        "docs",
         "src",
         "tests",
     },

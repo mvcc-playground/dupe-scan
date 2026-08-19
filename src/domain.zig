@@ -13,6 +13,8 @@ pub const Backend = enum {
     win32,
 };
 
+pub const OutputFormat = enum { jsonl, text };
+
 pub const VolumeKey = struct {
     raw: u64,
 
@@ -90,6 +92,7 @@ pub const ScanRequest = struct {
     output_path: ?[]const u8 = null,
     workers: WorkerLimit = .auto,
     backend: Backend = .auto,
+    format: OutputFormat = .jsonl,
 };
 
 pub fn autoReaders(class: DriveClass) u8 {

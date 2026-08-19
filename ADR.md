@@ -26,6 +26,12 @@ Quando `--workers` não é informado, o scheduler consulta rapidamente a quantid
 
 Essa escolha é deliberadamente conservadora para discos: mais threads não garantem mais velocidade quando o gargalo é I/O. O plano efetivo continua aparecendo no `scan_summary.worker_plan`, permitindo medir e ajustar por máquina.
 
+## Saida legivel e contrato NDJSON (2026-08-19)
+
+O contrato de dados permanece JSONL/NDJSON valido em UTF-8: um objeto por linha para automacao. Para leitura humana, o terminal interativo escolhe `text` automaticamente; `--format text` e `--format jsonl` permitem escolha explicita. O formato texto separa duplicatas, colisoes, erros e resumo, calcula throughput e emite hyperlinks OSC-8 `file:///...` quando o terminal suporta, mantendo o caminho literal como fallback.
+
+Redirecionamentos e `--output` continuam JSONL por padrao para nao misturar diagnostico/progresso com dados. A especificacao NDJSON exige UTF-8 e um valor JSON valido por linha ([ndjson-spec](https://github.com/ndjson/ndjson-spec)); essa decisao preserva streaming e validacao com ferramentas comuns.
+
 ## Contexto
 
 O `dupe-scan` já usa `std.Io` nos adapters, mas o pipeline ainda é uma sequência de barreiras:
