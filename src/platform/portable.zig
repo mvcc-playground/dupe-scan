@@ -8,6 +8,7 @@ const sample_size: u64 = 64 * 1024;
 pub const Adapter = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    exclude_dirs: []const []const u8 = &.{},
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) Adapter {
         return .{ .allocator = allocator, .io = io };
@@ -19,6 +20,10 @@ pub const Adapter = struct {
 
     pub fn fileReader(self: *Adapter) ports.FileReader {
         return .{ .context = @ptrCast(self), .fingerprint = fingerprint, .full_hash = fullHash };
+    }
+
+    pub fn setExcludeDirs(self: *Adapter, names: []const []const u8) void {
+        self.exclude_dirs = names;
     }
 
     fn walk(context: *anyopaque, root: []const u8, visitor: ports.FileVisitor) anyerror!void {
@@ -44,10 +49,13 @@ pub const Adapter = struct {
             } orelse break;
 
             switch (entry.kind) {
-                .directory => selective_walker.enter(self.io, entry) catch |err| {
-                    const child_path = try self.childPath(absolute_root, entry.path);
-                    defer self.allocator.free(child_path);
-                    try self.emitError(visitor, mapError(err), child_path);
+                .directory => {
+                    if (isExcludedName(self.exclude_dirs, entry.basename)) continue;
+                    selective_walker.enter(self.io, entry) catch |err| {
+                        const child_path = try self.childPath(absolute_root, entry.path);
+                        defer self.allocator.free(child_path);
+                        try self.emitError(visitor, mapError(err), child_path);
+                    };
                 },
                 .file => self.emitFile(visitor, absolute_root, entry) catch |err| {
                     const child_path = try self.childPath(absolute_root, entry.path);
@@ -122,6 +130,11 @@ pub const Adapter = struct {
         return .{ .bytes = output };
     }
 };
+
+fn isExcludedName(excludes: []const []const u8, name: []const u8) bool {
+    for (excludes) |excluded| if (std.ascii.eqlIgnoreCase(excluded, name)) return true;
+    return false;
+}
 
 fn hashRange(io: std.Io, file: std.Io.File, offset: u64, buffer: []u8) !domain.ContentHash {
     const amount = try file.readPositionalAll(io, buffer, offset);

@@ -9,19 +9,31 @@ const windows = @import("windows");
 const progress_console = @import("progress_console");
 const zio = @import("zio");
 
+// ZIO's scheduler diagnostics are useful while developing the runtime, but
+// they must not pollute the CLI's progress/JSON output in normal builds.
+pub const std_options = std.Options{ .log_level = .info };
+
+const default_excludes = [_][]const u8{ "node_modules", "target", ".git", ".zig-cache", "zig-cache", "zig-out", ".cache", "__pycache__" };
+
 pub const ParsedArgs = struct {
     allocator: std.mem.Allocator,
     request: domain.ScanRequest,
 
     pub fn deinit(self: *ParsedArgs) void {
         self.allocator.free(self.request.roots);
+        if (self.request.exclude_dirs.len != 0) self.allocator.free(self.request.exclude_dirs);
         self.request.roots = &.{};
+        self.request.exclude_dirs = &.{};
     }
 };
 
 pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !ParsedArgs {
     var roots: std.ArrayListUnmanaged([]const u8) = .empty;
+    var excludes: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer roots.deinit(allocator);
+    errdefer excludes.deinit(allocator);
+
+    for (default_excludes) |name| try excludes.append(allocator, name);
 
     var output_path: ?[]const u8 = null;
     var workers: domain.WorkerLimit = .auto;
@@ -42,6 +54,10 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Parsed
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
             backend = try parseBackend(args[index]);
+        } else if (std.mem.eql(u8, argument, "--exclude")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            try excludes.append(allocator, args[index]);
         } else if (std.mem.startsWith(u8, argument, "--")) {
             return error.UnknownArgument;
         } else {
@@ -54,6 +70,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Parsed
         .allocator = allocator,
         .request = .{
             .roots = try roots.toOwnedSlice(allocator),
+            .exclude_dirs = try excludes.toOwnedSlice(allocator),
             .output_path = output_path,
             .workers = workers,
             .backend = backend,
@@ -129,9 +146,11 @@ fn renderRequest(allocator: std.mem.Allocator, io: std.Io, request: domain.ScanR
         (request.backend == .auto and builtin.os.tag == .windows);
     var result = if (use_windows) blk: {
         var adapter = windows.Adapter.init(allocator, io);
+        adapter.setExcludeDirs(request.exclude_dirs);
         break :blk try pipeline.scanIncremental(allocator, io, request, adapter.directoryWalker(), adapter.fileReader(), progress);
     } else blk: {
         var adapter = portable.Adapter.init(allocator, io);
+        adapter.setExcludeDirs(request.exclude_dirs);
         break :blk try pipeline.scanIncremental(allocator, io, request, adapter.directoryWalker(), adapter.fileReader(), progress);
     };
     defer result.deinit();

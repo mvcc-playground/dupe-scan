@@ -86,6 +86,7 @@ pub const VolumeReaderPlan = struct {
 
 pub const ScanRequest = struct {
     roots: []const []const u8,
+    exclude_dirs: []const []const u8 = &.{},
     output_path: ?[]const u8 = null,
     workers: WorkerLimit = .auto,
     backend: Backend = .auto,

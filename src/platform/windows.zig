@@ -106,6 +106,7 @@ extern "kernel32" fn SetFilePointerEx(
 pub const Adapter = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    exclude_dirs: []const []const u8 = &.{},
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) Adapter {
         return .{
@@ -120,6 +121,10 @@ pub const Adapter = struct {
 
     pub fn fileReader(self: *Adapter) ports.FileReader {
         return .{ .context = @ptrCast(self), .fingerprint = fingerprint, .full_hash = fullHash };
+    }
+
+    pub fn setExcludeDirs(self: *Adapter, names: []const []const u8) void {
+        self.exclude_dirs = names;
     }
 
     fn walk(context: *anyopaque, root: []const u8, visitor: ports.FileVisitor) anyerror!void {
@@ -214,6 +219,10 @@ pub const Adapter = struct {
         const absolute_path = try std.fs.path.join(self.allocator, &.{ directory.path, name });
         switch (mapAttributes(find_data.attributes)) {
             .directory => {
+                if (isExcludedName(self.exclude_dirs, name)) {
+                    self.allocator.free(absolute_path);
+                    return;
+                }
                 errdefer self.allocator.free(absolute_path);
                 try pending_directories.append(self.allocator, .{
                     .path = absolute_path,
@@ -311,6 +320,11 @@ pub const Adapter = struct {
         return handle;
     }
 };
+
+fn isExcludedName(excludes: []const []const u8, name: []const u8) bool {
+    for (excludes) |excluded| if (std.ascii.eqlIgnoreCase(excluded, name)) return true;
+    return false;
+}
 
 const PendingDirectory = struct {
     path: []u8,
