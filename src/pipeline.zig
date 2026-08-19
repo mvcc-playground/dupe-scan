@@ -563,11 +563,26 @@ pub fn buildGroups(allocator: std.mem.Allocator, hashed: []const HashedRecord) !
     const collision_group_count = countCollisionGroups(hashed, name_order);
     const name_collisions = try allocateCollisionGroups(allocator, hashed, name_order, collision_group_count);
 
+    std.mem.sortUnstable(DuplicateGroup, duplicates, {}, duplicateGroupSizeDescending);
+    std.mem.sortUnstable(NameCollisionGroup, name_collisions, {}, collisionGroupSizeDescending);
+
     return .{
         .allocator = allocator,
         .duplicates = duplicates,
         .name_collisions = name_collisions,
     };
+}
+
+fn duplicateGroupSizeDescending(_: void, left: DuplicateGroup, right: DuplicateGroup) bool {
+    const left_size = if (left.members.len == 0) 0 else left.members[0].record.size;
+    const right_size = if (right.members.len == 0) 0 else right.members[0].record.size;
+    if (left_size != right_size) return left_size > right_size;
+    return std.mem.order(u8, &left.digest.bytes, &right.digest.bytes) == .lt;
+}
+
+fn collisionGroupSizeDescending(_: void, left: NameCollisionGroup, right: NameCollisionGroup) bool {
+    if (left.size != right.size) return left.size > right.size;
+    return std.mem.order(u8, left.comparison_name, right.comparison_name) == .lt;
 }
 
 fn sortedIndexes(
