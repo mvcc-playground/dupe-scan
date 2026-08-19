@@ -7,7 +7,7 @@ written only to standard output.
 Build the benchmark binary in the mode used for performance comparisons:
 
 ```powershell
-& 'C:\Users\User\AppData\Local\mise\installs\zig\0.16.0\zig.exe' build bench -Doptimize=ReleaseFast --cache-dir zig-cache --global-cache-dir .zig-global-cache -- .\tests\fixtures --backend auto --workers auto
+zig build bench -Doptimize=ReleaseFast -- .\tests\fixtures --backend auto --workers auto
 ```
 
 Use a project-owned fixture or a dedicated disposable benchmark directory.
