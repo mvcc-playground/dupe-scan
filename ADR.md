@@ -40,6 +40,10 @@ No formato humano, cada membro continua sendo exibido como `FILE`, com nome, tam
 
 Arquivos de tamanho zero foram removidos da etapa de candidatos. O conteudo vazio e identico por definicao, gerando grupos ruidosos com `.gitkeep`, arquivos temporarios e marcadores de cache. Eles continuam enumerados e nao sao apagados; apenas deixam de ser amostrados, hasheados e reportados como duplicatas.
 
+## Espaco recuperavel (2026-08-19)
+
+O resumo text calcula o espaco que pode ser liberado mantendo uma copia de cada grupo: soma os tamanhos dos membros a partir do segundo. O JSONL expoe o mesmo valor em `reclaimable_bytes`, preservando os tamanhos brutos para ferramentas.
+
 ## Contexto
 
 O `dupe-scan` já usa `std.Io` nos adapters, mas o pipeline ainda é uma sequência de barreiras:

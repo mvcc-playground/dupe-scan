@@ -41,6 +41,8 @@ zig build run -- 'D:\Backup' --format jsonl > resultado.jsonl
 
 O caminho de `--output` não pode existir: isso evita sobrescrever dados por engano.
 
+O resumo também informa o espaço recuperável: todas as cópias duplicadas do grupo, mantendo uma versão.
+
 ## Opções
 
 ```text

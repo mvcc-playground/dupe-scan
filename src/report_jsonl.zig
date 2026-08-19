@@ -32,7 +32,7 @@ pub const JsonlReporter = struct {
     ) !void {
         for (grouping.duplicates) |group| try self.writeDuplicateGroup(group);
         for (grouping.name_collisions) |group| try self.writeCollisionGroup(group);
-        try self.writeSummary(backend, metrics, worker_plan);
+        try self.writeSummary(backend, grouping, metrics, worker_plan);
     }
 
     fn writeDuplicateGroup(self: *JsonlReporter, group: pipeline.DuplicateGroup) !void {
@@ -62,11 +62,12 @@ pub const JsonlReporter = struct {
     fn writeSummary(
         self: *JsonlReporter,
         backend: domain.Backend,
+        grouping: pipeline.Grouping,
         metrics: domain.Metrics,
         worker_plan: []const domain.VolumeReaderPlan,
     ) !void {
         try self.writer.print(
-            "{{\"schema_version\":1,\"event\":\"scan_summary\",\"backend\":\"{s}\",\"files_enumerated\":{d},\"bytes_enumerated\":{d},\"size_candidates\":{d},\"sample_candidates\":{d},\"full_hashes\":{d},\"bytes_read\":{d},\"skipped_entries\":{d},\"recoverable_errors\":{d},\"elapsed_ns\":{d},\"worker_plan\":[",
+            "{{\"schema_version\":1,\"event\":\"scan_summary\",\"backend\":\"{s}\",\"files_enumerated\":{d},\"bytes_enumerated\":{d},\"size_candidates\":{d},\"sample_candidates\":{d},\"full_hashes\":{d},\"bytes_read\":{d},\"reclaimable_bytes\":{d},\"skipped_entries\":{d},\"recoverable_errors\":{d},\"elapsed_ns\":{d},\"worker_plan\":[",
             .{
                 @tagName(backend),
                 metrics.files_enumerated,
@@ -75,6 +76,7 @@ pub const JsonlReporter = struct {
                 metrics.sample_candidates,
                 metrics.full_hashes,
                 metrics.bytes_read,
+                pipeline.reclaimableBytes(grouping),
                 metrics.skipped_entries,
                 metrics.recoverable_errors,
                 metrics.elapsed_ns,

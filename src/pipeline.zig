@@ -573,6 +573,14 @@ pub fn buildGroups(allocator: std.mem.Allocator, hashed: []const HashedRecord) !
     };
 }
 
+pub fn reclaimableBytes(grouping: Grouping) u64 {
+    var total: u64 = 0;
+    for (grouping.duplicates) |group| {
+        for (group.members[1..]) |member| total += member.record.size;
+    }
+    return total;
+}
+
 fn duplicateGroupSizeDescending(_: void, left: DuplicateGroup, right: DuplicateGroup) bool {
     const left_size = if (left.members.len == 0) 0 else left.members[0].record.size;
     const right_size = if (right.members.len == 0) 0 else right.members[0].record.size;

@@ -53,6 +53,8 @@ pub const TextReporter = struct {
         try writeSize(self.writer, result.metrics.bytes_enumerated);
         try self.writer.print("\nCandidatos: {d}\nHashes completos: {d}\nBytes lidos: ", .{ result.metrics.sample_candidates, result.metrics.full_hashes });
         try writeSize(self.writer, result.metrics.bytes_read);
+        try self.writer.writeAll("\nEspaco recuperavel: ");
+        try writeSize(self.writer, pipeline.reclaimableBytes(result.grouping));
         try self.writer.print("\nTempo: {d:.2} s\nArquivos/s: {d:.1}\nMiB/s: {d:.1}\nErros: {d}\n", .{ seconds, files_per_second, mib_per_second, result.metrics.recoverable_errors });
     }
 

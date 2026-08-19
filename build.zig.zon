@@ -1,6 +1,6 @@
 .{
     .name = .dupe_scan,
-    .version = "0.1.0",
+    .version = "0.1.7",
     .fingerprint = 0xe8d32198f28a27cd,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
