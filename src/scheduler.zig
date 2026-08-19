@@ -35,6 +35,8 @@ pub const Plan = struct {
     }
 };
 
+const max_explicit_readers: u8 = 32;
+
 pub fn plan(
     allocator: std.mem.Allocator,
     queues: []const VolumeQueue,
@@ -48,14 +50,14 @@ pub fn plan(
 
     var remaining = readerCeiling(queues, ceiling);
     allocateFirstReaders(queues, allocations, &remaining);
-    allocateFixedSecondReaders(queues, allocations, &remaining);
+    allocateAdditionalReaders(queues, allocations, &remaining);
 
     return .{ .allocator = allocator, .allocations = allocations };
 }
 
 fn readerCeiling(queues: []const VolumeQueue, ceiling: domain.WorkerLimit) u8 {
     return switch (ceiling) {
-        .explicit => |count| @intCast(@min(count, std.math.maxInt(u8))),
+        .explicit => |count| @intCast(@min(count, max_explicit_readers)),
         .auto => blk: {
             var total: u16 = 0;
             for (queues) |queue| {
@@ -75,11 +77,19 @@ fn allocateFirstReaders(queues: []const VolumeQueue, allocations: []ReaderAlloca
     }
 }
 
-fn allocateFixedSecondReaders(queues: []const VolumeQueue, allocations: []ReaderAllocation, remaining: *u8) void {
-    for (queues, allocations) |queue, *allocation| {
-        if (remaining.* == 0) return;
-        if (queue.class != .fixed or allocation.readers == 0 or queue.pending <= allocation.readers) continue;
-        allocation.readers += 1;
-        remaining.* -= 1;
+fn allocateAdditionalReaders(queues: []const VolumeQueue, allocations: []ReaderAllocation, remaining: *u8) void {
+    // Add readers round-robin so an explicit worker limit is useful even when
+    // all candidates are on one volume. Removable/remote volumes stay at one
+    // reader to avoid seek and network contention.
+    while (remaining.* != 0) {
+        var allocated = false;
+        for (queues, allocations) |queue, *allocation| {
+            if (remaining.* == 0) break;
+            if (queue.class != .fixed or allocation.readers == 0 or queue.pending <= allocation.readers) continue;
+            allocation.readers += 1;
+            remaining.* -= 1;
+            allocated = true;
+        }
+        if (!allocated) break;
     }
 }

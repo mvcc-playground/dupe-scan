@@ -27,3 +27,17 @@ test "scheduler never exceeds an explicit worker ceiling" {
     try std.testing.expectEqual(@as(u8, 1), plan.readerCountFor(.{ .raw = 2 }));
     try std.testing.expectEqual(@as(u8, 0), plan.readerCountFor(.{ .raw = 3 }));
 }
+
+test "scheduler uses explicit workers on a single fixed volume with a safe cap" {
+    var twelve = try scheduler.plan(std.testing.allocator, &.{
+        .{ .key = .{ .raw = 1 }, .class = .fixed, .pending = 100 },
+    }, .{ .explicit = 12 });
+    defer twelve.deinit();
+    try std.testing.expectEqual(@as(u8, 12), twelve.totalReaders());
+
+    var capped = try scheduler.plan(std.testing.allocator, &.{
+        .{ .key = .{ .raw = 1 }, .class = .fixed, .pending = 100 },
+    }, .{ .explicit = 120 });
+    defer capped.deinit();
+    try std.testing.expectEqual(@as(u8, 32), capped.totalReaders());
+}

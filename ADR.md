@@ -14,6 +14,12 @@
 
 Proximas etapas: medir tempo ate primeira amostra/hash; migrar hash e grouper para filas adicionais somente se o benchmark ReleaseFast justificar; depois otimizar conversoes UTF-16/UTF-8 no Windows.
 
+## Correcao de paralelismo (2026-08-19)
+
+O primeiro ajuste de `--workers` tinha uma falha: a politica ainda reservava no maximo dois leitores por volume fixo, entao valores 12 e 120 produziam o mesmo plano. A politica agora distribui leitores adicionais em round-robin entre volumes fixos e limita valores explicitos a 32 leitores para evitar tempestade de seeks, memoria e handles. Volumes removiveis/remotos continuam com um leitor.
+
+O texto `Hashing 16/N` e um marco de progresso, nao uma barreira: cada worker continua processando itens enquanto o contador e atualizado a cada 16 conclusoes. A fila ZIO continua limitada; a documentacao do projeto confirma que `std.Io`/queues sao a abstracao de concorrencia usada pelo runtime ([ZIO](https://github.com/lalinsky/zio)).
+
 ## Contexto
 
 O `dupe-scan` já usa `std.Io` nos adapters, mas o pipeline ainda é uma sequência de barreiras:

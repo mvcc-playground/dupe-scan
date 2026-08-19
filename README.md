@@ -37,10 +37,11 @@ O caminho de `--output` não pode existir: isso evita sobrescrever dados por eng
 ## Opções
 
 ```text
-dupe-scan <raiz>... [--output <arquivo>] [--workers auto|N] [--backend auto|portable|win32]
+dupe-scan <raiz>... [--output <arquivo>] [--workers auto|N] [--exclude <diretório>] [--backend auto|portable|win32]
 ```
 
-- `--workers auto` aplica limites por volume; `N` define um teto global.
+- `--workers auto` aplica limites por volume; `N` define um teto global (limitado a 32 leitores para manter o sistema responsivo).
+- `--exclude` pode ser repetido; por padrão ignora `node_modules`, `target`, `.git`, caches Zig, `.cache` e `__pycache__`.
 - `--backend auto` seleciona Win32 no Windows e o backend portátil nas demais plataformas.
 - `--backend portable` força o backend portátil.
 - `--backend win32` exige Windows.
