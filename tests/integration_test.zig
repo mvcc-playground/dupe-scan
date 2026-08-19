@@ -26,6 +26,7 @@ test "portable scan finds real duplicate bytes and same-name collisions" {
         .{ .roots = &.{relative_root}, .workers = .auto, .backend = .portable },
         adapter.directoryWalker(),
         adapter.fileReader(),
+        null,
     );
     defer result.deinit();
 
@@ -52,6 +53,7 @@ test "portable scan records a missing root without aborting its other roots" {
         .{ .roots = &.{ "does-not-exist-for-dupe-scan", present }, .workers = .auto, .backend = .portable },
         adapter.directoryWalker(),
         adapter.fileReader(),
+        null,
     );
     defer result.deinit();
 

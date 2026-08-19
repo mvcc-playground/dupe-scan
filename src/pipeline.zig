@@ -90,10 +90,13 @@ pub fn scan(
     request: domain.ScanRequest,
     walker: ports.DirectoryWalker,
     reader: ports.FileReader,
+    progress: ?ports.ProgressObserver,
 ) !ScanResult {
     const started = std.Io.Timestamp.now(io, .awake);
-    var collector = RecordCollector.init(allocator);
+    var collector = RecordCollector.init(allocator, progress);
     errdefer collector.deinit();
+
+    beginProgress(progress, .enumerating, null);
 
     const visitor = ports.FileVisitor{
         .context = @ptrCast(&collector),
@@ -111,14 +114,20 @@ pub fn scan(
 
     var sampled: std.ArrayListUnmanaged(SampledRecord) = .empty;
     defer sampled.deinit(allocator);
+    beginProgress(progress, .sampling, collector.metrics.size_candidates);
+    var samples_completed: u64 = 0;
     for (buckets.buckets) |bucket| {
         for (bucket.indexes) |record_index| {
             const record = collector.records.items[record_index];
             const fingerprint = reader.fingerprint(reader.context, record.absolute_path, record.size, buffer) catch |err| {
                 try collector.appendReadError(record.absolute_path, err);
+                samples_completed += 1;
+                advanceProgress(progress, .sampling, samples_completed, collector.metrics.size_candidates);
                 continue;
             };
             try sampled.append(allocator, .{ .record_index = record_index, .fingerprint = fingerprint });
+            samples_completed += 1;
+            advanceProgress(progress, .sampling, samples_completed, collector.metrics.size_candidates);
         }
     }
 
@@ -127,7 +136,8 @@ pub fn scan(
     collector.metrics.sample_candidates = @intCast(full_candidates.len);
 
     collector.metrics.full_hashes = @intCast(full_candidates.len);
-    var batch = try hashCandidates(allocator, io, request.workers, collector.records.items, full_candidates, reader);
+    beginProgress(progress, .hashing, collector.metrics.full_hashes);
+    var batch = try hashCandidates(allocator, io, request.workers, collector.records.items, full_candidates, reader, progress);
     defer batch.deinit(allocator);
 
     var hashed: std.ArrayListUnmanaged(HashedRecord) = .empty;
@@ -143,6 +153,7 @@ pub fn scan(
         }
     }
 
+    beginProgress(progress, .grouping, null);
     var grouping = try buildGroups(allocator, hashed.items);
     errdefer grouping.deinit();
     const worker_plan = batch.takeWorkerPlan();
@@ -153,6 +164,7 @@ pub fn scan(
     errdefer freeErrors(allocator, errors);
     const elapsed = started.untilNow(io, .awake).toNanoseconds();
     collector.metrics.elapsed_ns = @intCast(@max(elapsed, 0));
+    completeProgress(progress, collector.metrics);
 
     return .{
         .allocator = allocator,
@@ -206,6 +218,9 @@ const HashState = struct {
     candidate_indexes: []const usize,
     jobs: []VolumeJobs,
     outcomes: []?HashOutcome,
+    progress: ?ports.ProgressObserver,
+    completed: u64 = 0,
+    progress_mutex: std.Io.Mutex = .init,
 
     fn takePosition(self: *HashState, volume_index: usize) ?usize {
         const job = &self.jobs[volume_index];
@@ -215,6 +230,14 @@ const HashState = struct {
         const position = job.positions.items[job.next_position];
         job.next_position += 1;
         return position;
+    }
+
+    fn reportCompleted(self: *HashState) void {
+        self.progress_mutex.lockUncancelable(self.io);
+        self.completed += 1;
+        const completed = self.completed;
+        self.progress_mutex.unlock(self.io);
+        advanceProgress(self.progress, .hashing, completed, @intCast(self.outcomes.len));
     }
 };
 
@@ -236,6 +259,7 @@ const HashWorker = struct {
                 break :blk .{ .digest = digest };
             };
             self.state.outcomes[position] = outcome;
+            self.state.reportCompleted();
         }
     }
 };
@@ -247,6 +271,7 @@ fn hashCandidates(
     records: []const domain.FileRecord,
     candidate_indexes: []const usize,
     reader: ports.FileReader,
+    progress: ?ports.ProgressObserver,
 ) !HashBatch {
     const outcomes = try allocator.alloc(?HashOutcome, candidate_indexes.len);
     errdefer allocator.free(outcomes);
@@ -284,6 +309,7 @@ fn hashCandidates(
         .candidate_indexes = candidate_indexes,
         .jobs = jobs.items,
         .outcomes = outcomes,
+        .progress = progress,
     };
     const worker_infos = try allocator.alloc(HashWorker, worker_count);
     defer allocator.free(worker_infos);
@@ -567,9 +593,10 @@ const RecordCollector = struct {
     records: std.ArrayListUnmanaged(domain.FileRecord) = .empty,
     errors: std.ArrayListUnmanaged(domain.ScanError) = .empty,
     metrics: domain.Metrics = .{},
+    progress: ?ports.ProgressObserver,
 
-    fn init(allocator: std.mem.Allocator) RecordCollector {
-        return .{ .allocator = allocator };
+    fn init(allocator: std.mem.Allocator, progress: ?ports.ProgressObserver) RecordCollector {
+        return .{ .allocator = allocator, .progress = progress };
     }
 
     fn deinit(self: *RecordCollector) void {
@@ -584,6 +611,7 @@ const RecordCollector = struct {
         try self.records.append(self.allocator, record);
         self.metrics.files_enumerated += 1;
         self.metrics.bytes_enumerated += record.size;
+        advanceProgress(self.progress, .enumerating, self.metrics.files_enumerated, 0);
     }
 
     fn onError(context: *anyopaque, scan_error: domain.ScanError) anyerror!void {
@@ -600,6 +628,18 @@ const RecordCollector = struct {
         try RecordCollector.onError(@ptrCast(self), .{ .kind = kind, .path = owned_path });
     }
 };
+
+fn beginProgress(progress: ?ports.ProgressObserver, phase: ports.ProgressPhase, total: ?u64) void {
+    if (progress) |observer| observer.begin(observer.context, phase, total);
+}
+
+fn advanceProgress(progress: ?ports.ProgressObserver, phase: ports.ProgressPhase, completed: u64, total: u64) void {
+    if (progress) |observer| observer.advance(observer.context, phase, completed, total);
+}
+
+fn completeProgress(progress: ?ports.ProgressObserver, metrics: domain.Metrics) void {
+    if (progress) |observer| observer.complete(observer.context, metrics);
+}
 
 fn fullHashCandidateIndexes(
     allocator: std.mem.Allocator,

@@ -17,6 +17,21 @@ pub const FileReader = struct {
     full_hash: *const fn (context: *anyopaque, path: []const u8, expected_size: u64, buffer: []u8) anyerror!domain.ContentHash,
 };
 
+pub const ProgressPhase = enum {
+    enumerating,
+    sampling,
+    hashing,
+    grouping,
+    complete,
+};
+
+pub const ProgressObserver = struct {
+    context: *anyopaque,
+    begin: *const fn (context: *anyopaque, phase: ProgressPhase, total: ?u64) void,
+    advance: *const fn (context: *anyopaque, phase: ProgressPhase, completed: u64, total: u64) void,
+    complete: *const fn (context: *anyopaque, metrics: domain.Metrics) void,
+};
+
 pub const VolumeClassifier = struct {
     context: *anyopaque,
     classify: *const fn (context: *anyopaque, root: []const u8) anyerror!domain.DriveClass,

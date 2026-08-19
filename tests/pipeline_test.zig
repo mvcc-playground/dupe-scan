@@ -30,6 +30,38 @@ const ConcurrentReader = struct {
     }
 };
 
+const ProgressProbe = struct {
+    mutex: std.Io.Mutex = .init,
+    sampling_total: u64 = 0,
+    hashing_total: u64 = 0,
+    hashing_completed: u64 = 0,
+
+    fn onBegin(context: *anyopaque, phase: ports.ProgressPhase, total: ?u64) void {
+        const self: *ProgressProbe = @ptrCast(@alignCast(context));
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
+        switch (phase) {
+            .sampling => self.sampling_total = total orelse 0,
+            .hashing => self.hashing_total = total orelse 0,
+            else => {},
+        }
+    }
+
+    fn onAdvance(context: *anyopaque, phase: ports.ProgressPhase, completed: u64, _: u64) void {
+        const self: *ProgressProbe = @ptrCast(@alignCast(context));
+        if (phase != .hashing) return;
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
+        self.hashing_completed = completed;
+    }
+
+    fn onComplete(_: *anyopaque, _: domain.Metrics) void {}
+
+    fn observer(self: *ProgressProbe) ports.ProgressObserver {
+        return .{ .context = @ptrCast(self), .begin = onBegin, .advance = onAdvance, .complete = onComplete };
+    }
+};
+
 const FixedVolumeWalker = struct {
     fn walk(_: *anyopaque, _: []const u8, visitor: ports.FileVisitor) anyerror!void {
         for ([_][]const u8{ "one.bin", "two.bin", "three.bin" }) |path| {
@@ -126,8 +158,28 @@ test "full hashing uses two readers for fixed-volume candidates when capped at t
         .{ .roots = &.{"fixture"}, .workers = .{ .explicit = 2 } },
         walker.port(),
         reader.port(),
+        null,
     );
     defer result.deinit();
 
     try std.testing.expectEqual(@as(u8, 2), reader.maximum_active);
+}
+
+test "scan reports determinate sampling and hashing progress" {
+    var walker = FixedVolumeWalker{};
+    var reader = ConcurrentReader{};
+    var progress = ProgressProbe{};
+    var result = try pipeline.scan(
+        std.testing.allocator,
+        std.testing.io,
+        .{ .roots = &.{"fixture"}, .workers = .{ .explicit = 1 } },
+        walker.port(),
+        reader.port(),
+        progress.observer(),
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(u64, 3), progress.sampling_total);
+    try std.testing.expectEqual(@as(u64, 3), progress.hashing_total);
+    try std.testing.expectEqual(@as(u64, 3), progress.hashing_completed);
 }
