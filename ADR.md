@@ -20,6 +20,12 @@ O primeiro ajuste de `--workers` tinha uma falha: a politica ainda reservava no 
 
 O texto `Hashing 16/N` e um marco de progresso, nao uma barreira: cada worker continua processando itens enquanto o contador e atualizado a cada 16 conclusoes. A fila ZIO continua limitada; a documentacao do projeto confirma que `std.Io`/queues sao a abstracao de concorrencia usada pelo runtime ([ZIO](https://github.com/lalinsky/zio)).
 
+## Workers automáticos (2026-08-19)
+
+Quando `--workers` não é informado, o scheduler consulta rapidamente a quantidade de CPUs lógicas e sugere `2x CPU`, com mínimo de 4 e máximo de 32 leitores. O limite de 32, combinado com buffers de 256 KiB por leitor e fila limitada, evita crescimento sem controle de memória. O usuário ainda pode fornecer `--workers N` para substituir a sugestão.
+
+Essa escolha é deliberadamente conservadora para discos: mais threads não garantem mais velocidade quando o gargalo é I/O. O plano efetivo continua aparecendo no `scan_summary.worker_plan`, permitindo medir e ajustar por máquina.
+
 ## Contexto
 
 O `dupe-scan` já usa `std.Io` nos adapters, mas o pipeline ainda é uma sequência de barreiras:

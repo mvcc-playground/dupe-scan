@@ -58,14 +58,23 @@ pub fn plan(
 fn readerCeiling(queues: []const VolumeQueue, ceiling: domain.WorkerLimit) u8 {
     return switch (ceiling) {
         .explicit => |count| @intCast(@min(count, max_explicit_readers)),
-        .auto => blk: {
-            var total: u16 = 0;
-            for (queues) |queue| {
-                if (queue.pending != 0) total += domain.autoReaders(queue.class);
-            }
-            break :blk @intCast(@min(total, std.math.maxInt(u8)));
-        },
+        .auto => autoReaderCeiling(queues),
     };
+}
+
+fn autoReaderCeiling(queues: []const VolumeQueue) u8 {
+    var active_volumes: u8 = 0;
+    for (queues) |queue| {
+        if (queue.pending != 0) active_volumes += 1;
+    }
+    if (active_volumes == 0) return 0;
+
+    // File hashing is I/O-bound on most Windows volumes, so start above the
+    // logical CPU count, but keep a hard cap. Each reader owns a 256 KiB stack
+    // buffer; the cap therefore bounds memory even when RAM is under pressure.
+    const cpu_count = std.Thread.getCpuCount() catch 4;
+    const suggested: usize = @max(@as(usize, 4), cpu_count * 2);
+    return @intCast(@min(suggested, max_explicit_readers));
 }
 
 fn allocateFirstReaders(queues: []const VolumeQueue, allocations: []ReaderAllocation, remaining: *u8) void {
