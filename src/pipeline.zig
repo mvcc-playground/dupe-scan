@@ -104,6 +104,7 @@ pub fn scan(
         .on_error = RecordCollector.onError,
     };
     for (request.roots) |root| try walker.walk(walker.context, root, visitor);
+    advanceProgress(progress, .enumerating, collector.metrics.files_enumerated, 0);
 
     var buckets = try bucketBySize(allocator, collector.records.items);
     defer buckets.deinit();
@@ -122,12 +123,12 @@ pub fn scan(
             const fingerprint = reader.fingerprint(reader.context, record.absolute_path, record.size, buffer) catch |err| {
                 try collector.appendReadError(record.absolute_path, err);
                 samples_completed += 1;
-                advanceProgress(progress, .sampling, samples_completed, collector.metrics.size_candidates);
+                if (samples_completed % 64 == 0) advanceProgress(progress, .sampling, samples_completed, collector.metrics.size_candidates);
                 continue;
             };
             try sampled.append(allocator, .{ .record_index = record_index, .fingerprint = fingerprint });
             samples_completed += 1;
-            advanceProgress(progress, .sampling, samples_completed, collector.metrics.size_candidates);
+            if (samples_completed % 64 == 0) advanceProgress(progress, .sampling, samples_completed, collector.metrics.size_candidates);
         }
     }
 
@@ -219,7 +220,7 @@ pub fn scanIncremental(
                 try collector.records.append(allocator, record);
                 collector.metrics.files_enumerated += 1;
                 collector.metrics.bytes_enumerated += record.size;
-                advanceProgress(progress, .enumerating, collector.metrics.files_enumerated, 0);
+                if (collector.metrics.files_enumerated % 64 == 0) advanceProgress(progress, .enumerating, collector.metrics.files_enumerated, 0);
                 const entry = try size_index.getOrPut(record.size);
                 if (!entry.found_existing) entry.value_ptr.* = .empty;
                 try entry.value_ptr.append(allocator, collector.records.items.len - 1);
@@ -247,6 +248,7 @@ pub fn scanIncremental(
         else => return err,
     }
     try group.await(io);
+    advanceProgress(progress, .enumerating, collector.metrics.files_enumerated, 0);
     collector.metrics.size_candidates = sample_count;
     beginProgress(progress, .sampling, sample_count);
     advanceProgress(progress, .sampling, sample_count, sample_count);
@@ -371,7 +373,7 @@ const HashState = struct {
         self.completed += 1;
         const completed = self.completed;
         self.progress_mutex.unlock(self.io);
-        advanceProgress(self.progress, .hashing, completed, @intCast(self.outcomes.len));
+        if (completed % 16 == 0) advanceProgress(self.progress, .hashing, completed, @intCast(self.outcomes.len));
     }
 };
 
@@ -465,6 +467,7 @@ fn hashCandidates(
         }
     }
     for (threads.items) |thread| thread.join();
+    advanceProgress(progress, .hashing, @intCast(outcomes.len), @intCast(outcomes.len));
 
     return .{ .outcomes = outcomes, .worker_plan = reported_plan };
 }
@@ -745,7 +748,7 @@ const RecordCollector = struct {
         try self.records.append(self.allocator, record);
         self.metrics.files_enumerated += 1;
         self.metrics.bytes_enumerated += record.size;
-        advanceProgress(self.progress, .enumerating, self.metrics.files_enumerated, 0);
+        if (self.metrics.files_enumerated % 64 == 0) advanceProgress(self.progress, .enumerating, self.metrics.files_enumerated, 0);
     }
 
     fn onError(context: *anyopaque, scan_error: domain.ScanError) anyerror!void {
