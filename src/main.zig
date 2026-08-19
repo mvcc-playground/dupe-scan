@@ -23,6 +23,8 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Parsed
     var output_path: ?[]const u8 = null;
     var workers: domain.WorkerLimit = .auto;
     var backend: domain.Backend = .auto;
+    var progress_mode: domain.ProgressMode = .auto;
+    var progress_mode_seen = false;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const argument = args[index];
@@ -39,6 +41,12 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Parsed
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
             backend = try parseBackend(args[index]);
+        } else if (std.mem.eql(u8, argument, "--progress")) {
+            if (progress_mode_seen) return error.DuplicateOption;
+            progress_mode_seen = true;
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            progress_mode = try parseProgressMode(args[index]);
         } else if (std.mem.startsWith(u8, argument, "--")) {
             return error.UnknownArgument;
         } else {
@@ -54,6 +62,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Parsed
             .output_path = output_path,
             .workers = workers,
             .backend = backend,
+            .progress_mode = progress_mode,
         },
     };
 }
@@ -94,12 +103,16 @@ pub fn main(init: std.process.Init) !void {
     const jsonl = try renderRequest(init.gpa, init.io, parsed.request);
     defer init.gpa.free(jsonl);
     if (parsed.request.output_path) |output_path| {
-        var report_file = try std.Io.Dir.cwd().createFile(init.io, output_path, .{});
+        var report_file = try createExclusiveReport(init.io, output_path);
         defer report_file.close(init.io);
         try report_file.writeStreamingAll(init.io, jsonl);
     } else {
         try std.Io.File.stdout().writeStreamingAll(init.io, jsonl);
     }
+}
+
+pub fn createExclusiveReport(io: std.Io, path: []const u8) !std.Io.File {
+    return std.Io.Dir.cwd().createFile(io, path, .{ .exclusive = true });
 }
 
 fn renderRequest(allocator: std.mem.Allocator, io: std.Io, request: domain.ScanRequest) ![]u8 {
@@ -134,4 +147,11 @@ fn parseBackend(value: []const u8) !domain.Backend {
     if (std.mem.eql(u8, value, "portable")) return .portable;
     if (std.mem.eql(u8, value, "win32")) return .win32;
     return error.InvalidBackend;
+}
+
+pub fn parseProgressMode(value: []const u8) !domain.ProgressMode {
+    if (std.mem.eql(u8, value, "auto")) return .auto;
+    if (std.mem.eql(u8, value, "always")) return .always;
+    if (std.mem.eql(u8, value, "never")) return .never;
+    return error.InvalidProgressMode;
 }

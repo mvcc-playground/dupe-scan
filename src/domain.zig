@@ -13,6 +13,12 @@ pub const Backend = enum {
     win32,
 };
 
+pub const ProgressMode = enum {
+    auto,
+    always,
+    never,
+};
+
 pub const VolumeKey = struct {
     raw: u64,
 
@@ -89,6 +95,7 @@ pub const ScanRequest = struct {
     output_path: ?[]const u8 = null,
     workers: WorkerLimit = .auto,
     backend: Backend = .auto,
+    progress_mode: ProgressMode = .auto,
 };
 
 pub fn autoReaders(class: DriveClass) u8 {
