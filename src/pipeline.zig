@@ -518,7 +518,7 @@ pub fn bucketBySize(allocator: std.mem.Allocator, records: []const domain.FileRe
     while (start < sorted_indexes.len) {
         var end = start + 1;
         while (end < sorted_indexes.len and records[sorted_indexes[end]].size == records[sorted_indexes[start]].size) : (end += 1) {}
-        if (end - start >= 2) bucket_count += 1;
+        if (records[sorted_indexes[start]].size != 0 and end - start >= 2) bucket_count += 1;
         start = end;
     }
     if (bucket_count == 0) return .{ .allocator = allocator };
@@ -529,7 +529,7 @@ pub fn bucketBySize(allocator: std.mem.Allocator, records: []const domain.FileRe
     while (start < sorted_indexes.len) {
         var end = start + 1;
         while (end < sorted_indexes.len and records[sorted_indexes[end]].size == records[sorted_indexes[start]].size) : (end += 1) {}
-        if (end - start >= 2) {
+        if (records[sorted_indexes[start]].size != 0 and end - start >= 2) {
             const member_indexes = try allocator.alloc(usize, end - start);
             errdefer allocator.free(member_indexes);
             for (sorted_indexes[start..end], 0..) |member, destination| member_indexes[destination] = member;

@@ -36,6 +36,10 @@ Redirecionamentos e `--output` continuam JSONL por padrao para nao misturar diag
 
 No formato humano, cada membro continua sendo exibido como `FILE`, com nome, tamanho e caminho clicavel. Em seguida, o reporter lista as pastas pai como `FOLDER`, removendo repeticoes dentro do mesmo grupo. Assim, arquivos continuam verificaveis individualmente e a pasta pode ser aberta para uma acao manual; nenhuma exclusao automatica e feita.
 
+## Arquivos vazios (2026-08-19)
+
+Arquivos de tamanho zero foram removidos da etapa de candidatos. O conteudo vazio e identico por definicao, gerando grupos ruidosos com `.gitkeep`, arquivos temporarios e marcadores de cache. Eles continuam enumerados e nao sao apagados; apenas deixam de ser amostrados, hasheados e reportados como duplicatas.
+
 ## Contexto
 
 O `dupe-scan` já usa `std.Io` nos adapters, mas o pipeline ainda é uma sequência de barreiras:

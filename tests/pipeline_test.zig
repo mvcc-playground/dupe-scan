@@ -118,6 +118,19 @@ test "size bucketing keeps only files that share an exact size" {
     try std.testing.expectEqual(@as(usize, 2), buckets.candidateFileCount());
 }
 
+test "zero-byte files are not reported as duplicate candidates" {
+    const records = [_]domain.FileRecord{
+        record("C:/scan/empty-a", "empty-a", 0),
+        record("C:/scan/empty-b", "empty-b", 0),
+        record("C:/scan/data-a", "data-a", 4),
+        record("C:/scan/data-b", "data-b", 4),
+    };
+    var buckets = try pipeline.bucketBySize(std.testing.allocator, &records);
+    defer buckets.deinit();
+    try std.testing.expectEqual(@as(usize, 1), buckets.candidateBucketCount());
+    try std.testing.expectEqual(@as(usize, 2), buckets.candidateFileCount());
+}
+
 test "same normalized name and size with unequal digest is a collision" {
     var grouping = try pipeline.buildGroups(std.testing.allocator, &[_]pipeline.HashedRecord{
         hashed("C:/one/report.bin", "report.bin", 4, 1),
