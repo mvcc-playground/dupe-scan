@@ -1,10 +1,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const domain = @import("domain");
+const ports = @import("ports");
 const pipeline = @import("pipeline");
 const portable = @import("portable");
 const report_jsonl = @import("report_jsonl");
 const windows = @import("windows");
+const progress_console = @import("progress_console");
 
 pub const ParsedArgs = struct {
     allocator: std.mem.Allocator,
@@ -77,7 +79,7 @@ pub fn runWithWriter(
     defer parsed.deinit();
     if (parsed.request.output_path != null) return error.OutputPathRequiresFileExecution;
 
-    const jsonl = try renderRequest(allocator, io, parsed.request);
+    const jsonl = try renderRequest(allocator, io, parsed.request, null);
     defer allocator.free(jsonl);
     try writer.writeAll(jsonl);
 }
@@ -100,13 +102,15 @@ pub fn main(init: std.process.Init) !void {
 
     var parsed = try parseArgs(init.gpa, args.items);
     defer parsed.deinit();
-    const jsonl = try renderRequest(init.gpa, init.io, parsed.request);
-    defer init.gpa.free(jsonl);
     if (parsed.request.output_path) |output_path| {
         var report_file = try createExclusiveReport(init.io, output_path);
         defer report_file.close(init.io);
+        const jsonl = try renderWithProgress(init, parsed.request);
+        defer init.gpa.free(jsonl);
         try report_file.writeStreamingAll(init.io, jsonl);
     } else {
+        const jsonl = try renderWithProgress(init, parsed.request);
+        defer init.gpa.free(jsonl);
         try std.Io.File.stdout().writeStreamingAll(init.io, jsonl);
     }
 }
@@ -115,16 +119,24 @@ pub fn createExclusiveReport(io: std.Io, path: []const u8) !std.Io.File {
     return std.Io.Dir.cwd().createFile(io, path, .{ .exclusive = true });
 }
 
-fn renderRequest(allocator: std.mem.Allocator, io: std.Io, request: domain.ScanRequest) ![]u8 {
+fn renderWithProgress(init: std.process.Init, request: domain.ScanRequest) ![]u8 {
+    var stderr_buffer: [1024]u8 = undefined;
+    var stderr_writer = std.Io.File.stderr().writer(init.io, &stderr_buffer);
+    const is_tty = std.Io.File.stderr().isTty(init.io) catch false;
+    var progress = progress_console.Renderer.init(init.io, &stderr_writer.interface, request.progress_mode, is_tty);
+    return renderRequest(init.gpa, init.io, request, progress.observer());
+}
+
+fn renderRequest(allocator: std.mem.Allocator, io: std.Io, request: domain.ScanRequest, progress: ?ports.ProgressObserver) ![]u8 {
     if (request.backend == .win32 and builtin.os.tag != .windows) return error.UnsupportedBackend;
     const use_windows = request.backend == .win32 or
         (request.backend == .auto and builtin.os.tag == .windows);
     var result = if (use_windows) blk: {
         var adapter = windows.Adapter.init(allocator, io);
-        break :blk try pipeline.scan(allocator, io, request, adapter.directoryWalker(), adapter.fileReader(), null);
+        break :blk try pipeline.scan(allocator, io, request, adapter.directoryWalker(), adapter.fileReader(), progress);
     } else blk: {
         var adapter = portable.Adapter.init(allocator, io);
-        break :blk try pipeline.scan(allocator, io, request, adapter.directoryWalker(), adapter.fileReader(), null);
+        break :blk try pipeline.scan(allocator, io, request, adapter.directoryWalker(), adapter.fileReader(), progress);
     };
     defer result.deinit();
 

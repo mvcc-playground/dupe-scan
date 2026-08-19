@@ -55,12 +55,23 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const progress_console_module = b.createModule(.{
+        .root_source_file = b.path("src/progress_console.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "domain", .module = domain_module },
+            .{ .name = "ports", .module = ports_module },
+        },
+    });
+
     const report_module = b.createModule(.{
         .root_source_file = b.path("src/report_jsonl.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "domain", .module = domain_module },
+            .{ .name = "ports", .module = ports_module },
             .{ .name = "pipeline", .module = pipeline_module },
         },
     });
@@ -71,10 +82,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "domain", .module = domain_module },
+            .{ .name = "ports", .module = ports_module },
             .{ .name = "pipeline", .module = pipeline_module },
             .{ .name = "portable", .module = portable_module },
             .{ .name = "report_jsonl", .module = report_module },
             .{ .name = "windows", .module = windows_module },
+            .{ .name = "progress_console", .module = progress_console_module },
         },
     });
 
@@ -107,6 +120,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "report_jsonl", .module = report_module },
             .{ .name = "main", .module = main_module },
             .{ .name = "windows", .module = windows_module },
+            .{ .name = "progress_console", .module = progress_console_module },
         },
     });
     const tests = b.addTest(.{ .root_module = test_module });

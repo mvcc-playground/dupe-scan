@@ -6,4 +6,5 @@ test {
     _ = @import("cli_test.zig");
     _ = @import("windows_reader_test.zig");
     _ = @import("scheduler_test.zig");
+    _ = @import("progress_test.zig");
 }
