@@ -212,7 +212,6 @@ pub fn scanIncremental(
     const buffer = try allocator.alloc(u8, worker_buffer_size);
     defer allocator.free(buffer);
     var sample_count: u64 = 0;
-    beginProgress(progress, .sampling, null);
 
     while (queue.getOne(io)) |item| {
         switch (item) {
@@ -235,7 +234,6 @@ pub fn scanIncremental(
                         };
                         try sampled.append(allocator, .{ .record_index = record_index, .fingerprint = fingerprint });
                         sample_count += 1;
-                        advanceProgress(progress, .sampling, sample_count, 0);
                     }
                 }
             },
@@ -250,6 +248,8 @@ pub fn scanIncremental(
     }
     try group.await(io);
     collector.metrics.size_candidates = sample_count;
+    beginProgress(progress, .sampling, sample_count);
+    advanceProgress(progress, .sampling, sample_count, sample_count);
 
     const full_candidates = try fullHashCandidateIndexes(allocator, collector.records.items, sampled.items);
     defer allocator.free(full_candidates);
