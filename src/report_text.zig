@@ -18,7 +18,9 @@ pub const TextReporter = struct {
             try writeHex(self.writer, group.digest.bytes[0..]);
             try self.writer.writeByte('\n');
             for (group.members) |member| {
-                try self.writer.print("  FILE   {s} ({d} bytes)\n         ", .{ basename(member.record.absolute_path), member.record.size });
+                try self.writer.print("  FILE   {s} (", .{basename(member.record.absolute_path)});
+                try writeSize(self.writer, member.record.size);
+                try self.writer.writeAll(")\n         ");
                 try self.writePath(member.record.absolute_path);
                 try self.writer.writeByte('\n');
             }
@@ -26,9 +28,13 @@ pub const TextReporter = struct {
         }
         try self.writer.print("\nColisoes de nome ({d})\n", .{result.grouping.name_collisions.len});
         for (result.grouping.name_collisions) |group| {
-            try self.writer.print("\n- {s} ({d} bytes)\n", .{ group.comparison_name, group.size });
+            try self.writer.print("\n- {s} (", .{group.comparison_name});
+            try writeSize(self.writer, group.size);
+            try self.writer.writeAll(")\n");
             for (group.members) |member| {
-                try self.writer.print("  FILE   {s} ({d} bytes)\n         ", .{ basename(member.record.absolute_path), member.record.size });
+                try self.writer.print("  FILE   {s} (", .{basename(member.record.absolute_path)});
+                try writeSize(self.writer, member.record.size);
+                try self.writer.writeAll(")\n         ");
                 try self.writePath(member.record.absolute_path);
                 try self.writer.writeByte('\n');
             }
@@ -43,17 +49,11 @@ pub const TextReporter = struct {
         const seconds = @as(f64, @floatFromInt(result.metrics.elapsed_ns)) / 1_000_000_000.0;
         const files_per_second = if (seconds > 0) @as(f64, @floatFromInt(result.metrics.files_enumerated)) / seconds else 0;
         const mib_per_second = if (seconds > 0) (@as(f64, @floatFromInt(result.metrics.bytes_read)) / (1024.0 * 1024.0)) / seconds else 0;
-        try self.writer.print("\nResumo\n------\nArquivos: {d}\nBytes enumerados: {d}\nCandidatos: {d}\nHashes completos: {d}\nBytes lidos: {d}\nTempo: {d:.2} s\nArquivos/s: {d:.1}\nMiB/s: {d:.1}\nErros: {d}\n", .{
-            result.metrics.files_enumerated,
-            result.metrics.bytes_enumerated,
-            result.metrics.sample_candidates,
-            result.metrics.full_hashes,
-            result.metrics.bytes_read,
-            seconds,
-            files_per_second,
-            mib_per_second,
-            result.metrics.recoverable_errors,
-        });
+        try self.writer.print("\nResumo\n------\nArquivos: {d}\nBytes enumerados: ", .{result.metrics.files_enumerated});
+        try writeSize(self.writer, result.metrics.bytes_enumerated);
+        try self.writer.print("\nCandidatos: {d}\nHashes completos: {d}\nBytes lidos: ", .{ result.metrics.sample_candidates, result.metrics.full_hashes });
+        try writeSize(self.writer, result.metrics.bytes_read);
+        try self.writer.print("\nTempo: {d:.2} s\nArquivos/s: {d:.1}\nMiB/s: {d:.1}\nErros: {d}\n", .{ seconds, files_per_second, mib_per_second, result.metrics.recoverable_errors });
     }
 
     fn writePath(self: *TextReporter, path: []const u8) !void {
@@ -99,6 +99,15 @@ fn parentPath(path: []const u8) []const u8 {
         if (path[index - 1] == '\\' or path[index - 1] == '/') return path[0 .. index - 1];
     }
     return ".";
+}
+
+fn writeSize(writer: *std.Io.Writer, size: u64) !void {
+    const value = @as(f64, @floatFromInt(size));
+    if (size >= 1 << 40) return writer.print("{d:.2} TiB", .{value / (1 << 40)});
+    if (size >= 1 << 30) return writer.print("{d:.2} GiB", .{value / (1 << 30)});
+    if (size >= 1 << 20) return writer.print("{d:.2} MiB", .{value / (1 << 20)});
+    if (size >= 1 << 10) return writer.print("{d:.2} KiB", .{value / (1 << 10)});
+    return writer.print("{d} bytes", .{size});
 }
 
 fn writeHex(writer: *std.Io.Writer, bytes: []const u8) !void {
