@@ -25,8 +25,6 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Parsed
     var output_path: ?[]const u8 = null;
     var workers: domain.WorkerLimit = .auto;
     var backend: domain.Backend = .auto;
-    var progress_mode: domain.ProgressMode = .auto;
-    var progress_mode_seen = false;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const argument = args[index];
@@ -43,12 +41,6 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Parsed
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
             backend = try parseBackend(args[index]);
-        } else if (std.mem.eql(u8, argument, "--progress")) {
-            if (progress_mode_seen) return error.DuplicateOption;
-            progress_mode_seen = true;
-            index += 1;
-            if (index == args.len) return error.MissingOptionValue;
-            progress_mode = try parseProgressMode(args[index]);
         } else if (std.mem.startsWith(u8, argument, "--")) {
             return error.UnknownArgument;
         } else {
@@ -64,7 +56,6 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Parsed
             .output_path = output_path,
             .workers = workers,
             .backend = backend,
-            .progress_mode = progress_mode,
         },
     };
 }
@@ -123,7 +114,7 @@ fn renderWithProgress(init: std.process.Init, request: domain.ScanRequest) ![]u8
     var stderr_buffer: [1024]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(init.io, &stderr_buffer);
     const is_tty = std.Io.File.stderr().isTty(init.io) catch false;
-    var progress = progress_console.Renderer.init(init.io, &stderr_writer.interface, request.progress_mode, is_tty);
+    var progress = progress_console.Renderer.init(init.io, &stderr_writer.interface, is_tty);
     return renderRequest(init.gpa, init.io, request, progress.observer());
 }
 
@@ -161,9 +152,3 @@ fn parseBackend(value: []const u8) !domain.Backend {
     return error.InvalidBackend;
 }
 
-pub fn parseProgressMode(value: []const u8) !domain.ProgressMode {
-    if (std.mem.eql(u8, value, "auto")) return .auto;
-    if (std.mem.eql(u8, value, "always")) return .always;
-    if (std.mem.eql(u8, value, "never")) return .never;
-    return error.InvalidProgressMode;
-}

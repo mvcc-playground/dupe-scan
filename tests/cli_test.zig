@@ -1,5 +1,4 @@
 const std = @import("std");
-const domain = @import("domain");
 const main = @import("main");
 
 test "argument parser rejects a mutation flag" {
@@ -9,16 +8,11 @@ test "argument parser rejects a mutation flag" {
     );
 }
 
-test "progress parser accepts known modes and rejects an invalid value" {
-    try std.testing.expectEqual(domain.ProgressMode.always, try main.parseProgressMode("always"));
-    try std.testing.expectEqual(domain.ProgressMode.never, try main.parseProgressMode("never"));
-    try std.testing.expectError(error.InvalidProgressMode, main.parseProgressMode("loud"));
-}
 
-test "argument parser rejects a duplicate progress option" {
+test "progress cannot be disabled because it is part of every scan" {
     try std.testing.expectError(
-        error.DuplicateOption,
-        main.parseArgs(std.testing.allocator, &.{ "C:\\scan", "--progress", "always", "--progress", "never" }),
+        error.UnknownArgument,
+        main.parseArgs(std.testing.allocator, &.{ "C:\\scan", "--progress", "never" }),
     );
 }
 

@@ -9,11 +9,11 @@ pub const Renderer = struct {
     interactive: bool,
     mutex: std.Io.Mutex = .init,
 
-    pub fn init(io: std.Io, writer: *std.Io.Writer, mode: domain.ProgressMode, is_tty: bool) Renderer {
+    pub fn init(io: std.Io, writer: *std.Io.Writer, is_tty: bool) Renderer {
         return .{
             .io = io,
             .writer = writer,
-            .enabled = mode == .always or (mode == .auto and is_tty),
+            .enabled = true,
             .interactive = is_tty,
         };
     }
