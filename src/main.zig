@@ -7,6 +7,7 @@ const portable = @import("portable");
 const report_jsonl = @import("report_jsonl");
 const windows = @import("windows");
 const progress_console = @import("progress_console");
+const zio = @import("zio");
 
 pub const ParsedArgs = struct {
     allocator: std.mem.Allocator,
@@ -76,6 +77,10 @@ pub fn runWithWriter(
 }
 
 pub fn main(init: std.process.Init) !void {
+    var runtime = try zio.Runtime.init(std.heap.smp_allocator, .{});
+    defer runtime.deinit();
+    const io = runtime.io();
+
     var iterator = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer iterator.deinit();
     _ = iterator.next();
@@ -94,15 +99,15 @@ pub fn main(init: std.process.Init) !void {
     var parsed = try parseArgs(init.gpa, args.items);
     defer parsed.deinit();
     if (parsed.request.output_path) |output_path| {
-        var report_file = try createExclusiveReport(init.io, output_path);
-        defer report_file.close(init.io);
-        const jsonl = try renderWithProgress(init, parsed.request);
+        var report_file = try createExclusiveReport(io, output_path);
+        defer report_file.close(io);
+        const jsonl = try renderWithProgress(io, init.gpa, parsed.request);
         defer init.gpa.free(jsonl);
-        try report_file.writeStreamingAll(init.io, jsonl);
+        try report_file.writeStreamingAll(io, jsonl);
     } else {
-        const jsonl = try renderWithProgress(init, parsed.request);
+        const jsonl = try renderWithProgress(io, init.gpa, parsed.request);
         defer init.gpa.free(jsonl);
-        try std.Io.File.stdout().writeStreamingAll(init.io, jsonl);
+        try std.Io.File.stdout().writeStreamingAll(io, jsonl);
     }
 }
 
@@ -110,12 +115,12 @@ pub fn createExclusiveReport(io: std.Io, path: []const u8) !std.Io.File {
     return std.Io.Dir.cwd().createFile(io, path, .{ .exclusive = true });
 }
 
-fn renderWithProgress(init: std.process.Init, request: domain.ScanRequest) ![]u8 {
+fn renderWithProgress(io: std.Io, allocator: std.mem.Allocator, request: domain.ScanRequest) ![]u8 {
     var stderr_buffer: [1024]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(init.io, &stderr_buffer);
-    const is_tty = std.Io.File.stderr().isTty(init.io) catch false;
-    var progress = progress_console.Renderer.init(init.io, &stderr_writer.interface, is_tty);
-    return renderRequest(init.gpa, init.io, request, progress.observer());
+    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
+    const is_tty = std.Io.File.stderr().isTty(io) catch false;
+    var progress = progress_console.Renderer.init(io, &stderr_writer.interface, is_tty);
+    return renderRequest(allocator, io, request, progress.observer());
 }
 
 fn renderRequest(allocator: std.mem.Allocator, io: std.Io, request: domain.ScanRequest, progress: ?ports.ProgressObserver) ![]u8 {
@@ -124,10 +129,10 @@ fn renderRequest(allocator: std.mem.Allocator, io: std.Io, request: domain.ScanR
         (request.backend == .auto and builtin.os.tag == .windows);
     var result = if (use_windows) blk: {
         var adapter = windows.Adapter.init(allocator, io);
-        break :blk try pipeline.scan(allocator, io, request, adapter.directoryWalker(), adapter.fileReader(), progress);
+        break :blk try pipeline.scanIncremental(allocator, io, request, adapter.directoryWalker(), adapter.fileReader(), progress);
     } else blk: {
         var adapter = portable.Adapter.init(allocator, io);
-        break :blk try pipeline.scan(allocator, io, request, adapter.directoryWalker(), adapter.fileReader(), progress);
+        break :blk try pipeline.scanIncremental(allocator, io, request, adapter.directoryWalker(), adapter.fileReader(), progress);
     };
     defer result.deinit();
 

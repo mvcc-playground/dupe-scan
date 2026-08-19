@@ -3,11 +3,18 @@
     .version = "0.1.0",
     .fingerprint = 0xe8d32198f28a27cd,
     .minimum_zig_version = "0.16.0",
-    .dependencies = .{},
+    .dependencies = .{
+        .zio = .{
+            .url = "git+https://github.com/lalinsky/zio?ref=main#1e9b15be900d6865479ea9d04705476f177a2e1f",
+            .hash = "zio-0.17.0-xHbVVBWGJwCugLsz4CAKL7ipUwryIonjrIBSPLBIyXto",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "mise.toml",
+        "README.md",
+        "ADR.md",
         "src",
         "tests",
     },

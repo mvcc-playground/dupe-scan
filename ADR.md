@@ -4,6 +4,16 @@
 - **Data:** 2026-08-19
 - **Decisão:** Adotar ZIO como runtime de concorrência e I/O da aplicação, mantendo `std.Io` como contrato das bibliotecas e adapters.
 
+## Implementacao registrada (2026-08-19)
+
+- O executavel inicializa `zio.Runtime` e passa `runtime.io()` para adapters e progresso.
+- ZIO esta fixado no commit `1e9b15be900d6865479ea9d04705476f177a2e1f`; o lock/hash fica em `build.zig.zon`.
+- `pipeline.scanIncremental` usa `std.Io.Queue` com capacidade 256 para transportar metadados e erros com backpressure. A enumeracao e a amostragem podem avancar em paralelo.
+- `pipeline.scan` permanece batch para testes e integracoes existentes, reduzindo risco enquanto hash/grouper incremental ainda sao medidos.
+- Validacao realizada: `zig build test --summary all` (24/24) e `zig build -Doptimize=ReleaseSafe`.
+
+Proximas etapas: medir tempo ate primeira amostra/hash; migrar hash e grouper para filas adicionais somente se o benchmark ReleaseFast justificar; depois otimizar conversoes UTF-16/UTF-8 no Windows.
+
 ## Contexto
 
 O `dupe-scan` já usa `std.Io` nos adapters, mas o pipeline ainda é uma sequência de barreiras:

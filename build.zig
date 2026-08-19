@@ -3,6 +3,8 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const zio_dependency = b.dependency("zio", .{ .target = target, .optimize = optimize });
+    const zio_module = zio_dependency.module("zio");
 
     const domain_module = b.createModule(.{
         .root_source_file = b.path("src/domain.zig"),
@@ -88,6 +90,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "report_jsonl", .module = report_module },
             .{ .name = "windows", .module = windows_module },
             .{ .name = "progress_console", .module = progress_console_module },
+            .{ .name = "zio", .module = zio_module },
         },
     });
 

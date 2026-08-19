@@ -176,6 +176,140 @@ pub fn scan(
     };
 }
 
+/// Incremental variant used by the executable. Enumeration, size indexing and
+/// fingerprinting overlap through a bounded std.Io queue. The final hash and
+/// grouping stages intentionally retain the batch implementation until their
+/// deterministic output contract is replaced by a streaming reducer.
+pub fn scanIncremental(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    request: domain.ScanRequest,
+    walker: ports.DirectoryWalker,
+    reader: ports.FileReader,
+    progress: ?ports.ProgressObserver,
+) !ScanResult {
+    const started = std.Io.Timestamp.now(io, .awake);
+    var collector = RecordCollector.init(allocator, progress);
+    errdefer collector.deinit();
+    beginProgress(progress, .enumerating, null);
+
+    var queue_buffer: [256]StreamItem = undefined;
+    var queue = std.Io.Queue(StreamItem).init(&queue_buffer);
+    var group: std.Io.Group = .init;
+    var producer = StreamProducer{ .io = io, .queue = &queue, .walker = walker, .request = request };
+    group.concurrent(io, StreamProducer.run, .{&producer}) catch |err| switch (err) {
+        error.ConcurrencyUnavailable => return scan(allocator, io, request, walker, reader, progress),
+    };
+
+    var sampled: std.ArrayListUnmanaged(SampledRecord) = .empty;
+    defer sampled.deinit(allocator);
+    var size_index = std.AutoHashMap(u64, std.ArrayListUnmanaged(usize)).init(allocator);
+    defer {
+        var values = size_index.valueIterator();
+        while (values.next()) |list| list.deinit(allocator);
+        size_index.deinit();
+    }
+    const buffer = try allocator.alloc(u8, worker_buffer_size);
+    defer allocator.free(buffer);
+    var sample_count: u64 = 0;
+    beginProgress(progress, .sampling, null);
+
+    while (queue.getOne(io)) |item| {
+        switch (item) {
+            .file => |record| {
+                try collector.records.append(allocator, record);
+                collector.metrics.files_enumerated += 1;
+                collector.metrics.bytes_enumerated += record.size;
+                advanceProgress(progress, .enumerating, collector.metrics.files_enumerated, 0);
+                const entry = try size_index.getOrPut(record.size);
+                if (!entry.found_existing) entry.value_ptr.* = .empty;
+                try entry.value_ptr.append(allocator, collector.records.items.len - 1);
+                const indexes = entry.value_ptr.items;
+                if (indexes.len >= 2) {
+                    const start = if (indexes.len == 2) indexes.len - 2 else indexes.len - 1;
+                    for (indexes[start..]) |record_index| {
+                        const candidate = collector.records.items[record_index];
+                        const fingerprint = reader.fingerprint(reader.context, candidate.absolute_path, candidate.size, buffer) catch |err| {
+                            try collector.appendReadError(candidate.absolute_path, err);
+                            continue;
+                        };
+                        try sampled.append(allocator, .{ .record_index = record_index, .fingerprint = fingerprint });
+                        sample_count += 1;
+                        advanceProgress(progress, .sampling, sample_count, 0);
+                    }
+                }
+            },
+            .scan_error => |scan_error| {
+                try collector.errors.append(allocator, scan_error);
+                collector.metrics.recoverable_errors += 1;
+            },
+        }
+    } else |err| switch (err) {
+        error.Closed => {},
+        else => return err,
+    }
+    try group.await(io);
+    collector.metrics.size_candidates = sample_count;
+
+    const full_candidates = try fullHashCandidateIndexes(allocator, collector.records.items, sampled.items);
+    defer allocator.free(full_candidates);
+    collector.metrics.sample_candidates = @intCast(full_candidates.len);
+    collector.metrics.full_hashes = @intCast(full_candidates.len);
+    beginProgress(progress, .hashing, collector.metrics.full_hashes);
+    var batch = try hashCandidates(allocator, io, request.workers, collector.records.items, full_candidates, reader, progress);
+    defer batch.deinit(allocator);
+    var hashed: std.ArrayListUnmanaged(HashedRecord) = .empty;
+    defer hashed.deinit(allocator);
+    for (batch.outcomes, 0..) |outcome, position| {
+        const record = collector.records.items[full_candidates[position]];
+        switch (outcome.?) {
+            .digest => |digest| {
+                collector.metrics.bytes_read += record.size;
+                try hashed.append(allocator, .{ .record = record, .digest = digest });
+            },
+            .failed => |err| try collector.appendReadError(record.absolute_path, err),
+        }
+    }
+    beginProgress(progress, .grouping, null);
+    var grouping = try buildGroups(allocator, hashed.items);
+    errdefer grouping.deinit();
+    const worker_plan = batch.takeWorkerPlan();
+    errdefer if (worker_plan.len != 0) allocator.free(worker_plan);
+    const records = try collector.records.toOwnedSlice(allocator);
+    errdefer freeRecords(allocator, records);
+    const errors = try collector.errors.toOwnedSlice(allocator);
+    errdefer freeErrors(allocator, errors);
+    const elapsed = started.untilNow(io, .awake).toNanoseconds();
+    collector.metrics.elapsed_ns = @intCast(@max(elapsed, 0));
+    completeProgress(progress, collector.metrics);
+    return .{ .allocator = allocator, .records = records, .errors = errors, .grouping = grouping, .metrics = collector.metrics, .worker_plan = worker_plan };
+}
+
+const StreamItem = union(enum) { file: domain.FileRecord, scan_error: domain.ScanError };
+
+const StreamProducer = struct {
+    io: std.Io,
+    queue: *std.Io.Queue(StreamItem),
+    walker: ports.DirectoryWalker,
+    request: domain.ScanRequest,
+
+    fn run(self: *@This()) std.Io.Cancelable!void {
+        const visitor = ports.FileVisitor{ .context = @ptrCast(self), .on_file = onFile, .on_error = onError };
+        for (self.request.roots) |root| self.walker.walk(self.walker.context, root, visitor) catch {};
+        self.queue.close(self.io);
+    }
+
+    fn onFile(context: *anyopaque, record: domain.FileRecord) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        try self.queue.putOne(self.io, .{ .file = record });
+    }
+
+    fn onError(context: *anyopaque, scan_error: domain.ScanError) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        try self.queue.putOne(self.io, .{ .scan_error = scan_error });
+    }
+};
+
 const HashOutcome = union(enum) {
     digest: domain.ContentHash,
     failed: anyerror,

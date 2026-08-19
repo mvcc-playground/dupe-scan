@@ -78,8 +78,11 @@ pub const Renderer = struct {
 
     fn renderDeterminate(self: *Renderer, buffer: []u8, label: []const u8, completed: u64, total: u64) []const u8 {
         _ = self;
+        if (total == 0) {
+            return std.fmt.bufPrint(buffer, "{s} {d}/? [????????????????????]", .{ label, completed }) catch "";
+        }
         var bar: [20]u8 = undefined;
-        const filled: usize = if (total == 0) 0 else @intCast(@min(@as(u64, bar.len), completed * bar.len / total));
+        const filled: usize = @intCast(@min(@as(u64, bar.len), completed * bar.len / total));
         @memset(bar[0..filled], '#');
         @memset(bar[filled..], '-');
         return std.fmt.bufPrint(buffer, "{s} {d}/{d} [{s}]", .{ label, completed, total, bar[0..] }) catch "";
