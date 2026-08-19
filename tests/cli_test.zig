@@ -72,4 +72,6 @@ test "CLI text format writes a human-readable summary" {
     try std.testing.expect(std.mem.indexOf(u8, text, "dupe-scan") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Resumo") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Duplicatas (1)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "FILE   first.bin") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "FOLDER") != null);
 }

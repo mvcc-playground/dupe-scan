@@ -18,19 +18,21 @@ pub const TextReporter = struct {
             try writeHex(self.writer, group.digest.bytes[0..]);
             try self.writer.writeByte('\n');
             for (group.members) |member| {
-                try self.writer.print("  - {d} bytes | ", .{member.record.size});
+                try self.writer.print("  FILE   {s} ({d} bytes)\n         ", .{ basename(member.record.absolute_path), member.record.size });
                 try self.writePath(member.record.absolute_path);
                 try self.writer.writeByte('\n');
             }
+            try self.writeFolders(group.members);
         }
         try self.writer.print("\nColisoes de nome ({d})\n", .{result.grouping.name_collisions.len});
         for (result.grouping.name_collisions) |group| {
             try self.writer.print("\n- {s} ({d} bytes)\n", .{ group.comparison_name, group.size });
             for (group.members) |member| {
-                try self.writer.writeAll("  - ");
+                try self.writer.print("  FILE   {s} ({d} bytes)\n         ", .{ basename(member.record.absolute_path), member.record.size });
                 try self.writePath(member.record.absolute_path);
                 try self.writer.writeByte('\n');
             }
+            try self.writeFolders(group.members);
         }
         try self.writer.print("\nErros recuperaveis ({d})\n", .{result.errors.len});
         for (result.errors) |scan_error| {
@@ -62,7 +64,42 @@ pub const TextReporter = struct {
         try self.writer.writeAll(path);
         try self.writer.writeAll("\x1b]8;;\x1b\\");
     }
+
+    fn writeFolders(self: *TextReporter, members: []const pipeline.HashedRecord) !void {
+        try self.writer.writeAll("  FOLDER\n");
+        for (members, 0..) |member, index| {
+            const folder = parentPath(member.record.absolute_path);
+            var repeated = false;
+            for (members[0..index]) |previous| {
+                if (std.mem.eql(u8, folder, parentPath(previous.record.absolute_path))) {
+                    repeated = true;
+                    break;
+                }
+            }
+            if (!repeated) {
+                try self.writer.writeAll("         ");
+                try self.writePath(folder);
+                try self.writer.writeByte('\n');
+            }
+        }
+    }
 };
+
+fn basename(path: []const u8) []const u8 {
+    var index = path.len;
+    while (index != 0) : (index -= 1) {
+        if (path[index - 1] == '\\' or path[index - 1] == '/') return path[index..];
+    }
+    return path;
+}
+
+fn parentPath(path: []const u8) []const u8 {
+    var index = path.len;
+    while (index != 0) : (index -= 1) {
+        if (path[index - 1] == '\\' or path[index - 1] == '/') return path[0 .. index - 1];
+    }
+    return ".";
+}
 
 fn writeHex(writer: *std.Io.Writer, bytes: []const u8) !void {
     const alphabet = "0123456789abcdef";
